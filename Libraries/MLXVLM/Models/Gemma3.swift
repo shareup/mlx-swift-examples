@@ -102,7 +102,7 @@ public struct Gemma3Configuration: Codable, Sendable {
 
 // MARK: - Attention
 
-class Attention: Module {
+private class Attention: Module {
     let numHeads: Int
     let numKVHeads: Int
     let repeats: Int
@@ -202,7 +202,7 @@ class Attention: Module {
 
 // MARK: - MLP
 
-class MLP: Module, UnaryLayer {
+private class MLP: Module, UnaryLayer {
     @ModuleInfo(key: "gate_proj") var gateProj: Linear
     @ModuleInfo(key: "down_proj") var downProj: Linear
     @ModuleInfo(key: "up_proj") var upProj: Linear
@@ -220,7 +220,7 @@ class MLP: Module, UnaryLayer {
 
 // MARK: - TransformerBlock
 
-class TransformerBlock: Module {
+private class TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Attention
     @ModuleInfo var mlp: MLP
     @ModuleInfo(key: "input_layernorm") var inputLayerNorm: GemmaUtils.RMSNorm
@@ -263,7 +263,7 @@ class TransformerBlock: Module {
 
 // MARK: - GemmaModel
 
-class GemmaModel: Module {
+private class GemmaModel: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [TransformerBlock]
     @ModuleInfo var norm: GemmaUtils.RMSNorm
@@ -324,7 +324,7 @@ class GemmaModel: Module {
 
 // MARK: - LanguageModel
 
-fileprivate class LanguageModel: Module, KVCacheDimensionProvider {
+private class LanguageModel: Module, KVCacheDimensionProvider {
     @ModuleInfo var model: GemmaModel
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
@@ -431,7 +431,7 @@ private class VisionAttention: Module, UnaryLayer {
     }
 }
 
-class VisionMLP: Module, UnaryLayer {
+private class VisionMLP: Module, UnaryLayer {
     @ModuleInfo(key: "fc1") var fc1: Linear
     @ModuleInfo(key: "fc2") var fc2: Linear
     @ModuleInfo var activationFn: GELU
@@ -507,7 +507,7 @@ private class Encoder: Module {
     }
 }
 
-class VisionEmbeddings: Module, UnaryLayer {
+private class VisionEmbeddings: Module, UnaryLayer {
     @ModuleInfo(key: "patch_embedding") var patchEmbedding: Conv2d
     @ModuleInfo(key: "position_embedding") var positionEmbedding: Embedding
 
