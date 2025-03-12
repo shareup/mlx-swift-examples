@@ -1,10 +1,10 @@
 import CoreImage
 import MLX
 import MLXFast
+import MLXLLM
 import MLXLMCommon
 import MLXNN
 import Tokenizers
-import MLXLLM
 
 // Based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/gemma3
 
@@ -136,7 +136,8 @@ private class Attention: Module {
         self._valueProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
         self._outputProj.wrappedValue = Linear(numHeads * headDim, dim, bias: false)
 
-        self._queryNorm.wrappedValue = GemmaUtils.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        self._queryNorm.wrappedValue = GemmaUtils.RMSNorm(
+            dimensions: headDim, eps: config.rmsNormEps)
         self._keyNorm.wrappedValue = GemmaUtils.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
 
         self.isSliding = (layerIdx + 1) % config.slidingWindowPattern != 0
@@ -366,7 +367,7 @@ private class LanguageModel: Module, KVCacheDimensionProvider {
 
 // MARK: - Vision Model Components
 
-private class VisionAttention: Module, UnaryLayer {
+private class VisionAttention: Module {
     @ModuleInfo(key: "q_proj") var queryProj: Linear
     @ModuleInfo(key: "k_proj") var keyProj: Linear
     @ModuleInfo(key: "v_proj") var valueProj: Linear
@@ -449,7 +450,7 @@ private class VisionMLP: Module, UnaryLayer {
     }
 }
 
-private class EncoderLayer: Module, UnaryLayer {
+private class EncoderLayer: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: VisionAttention
     @ModuleInfo(key: "layer_norm1") var layerNorm1: LayerNorm
     @ModuleInfo var mlp: VisionMLP
@@ -678,7 +679,7 @@ class Gemma3MultiModalProjector: Module, UnaryLayer {
         // Transpose to place h, w in indices 1, 2
         reshapedVisionOutputs = reshapedVisionOutputs.transposed(0, 2, 3, 1)
         var pooledVisionOutputs = avgPool(reshapedVisionOutputs)
-        pooledVisionOutputs = pooledVisionOutputs.transposed(0, 3, 1, 2).flattened(start: 1, end: 2)  // TODO: Is start: 1, end: 2 correct?
+        pooledVisionOutputs = pooledVisionOutputs.transposed(0, 3, 1, 2).flattened(start: 2) // TODO: Check if .flattened(start: 2) is correct
         pooledVisionOutputs = pooledVisionOutputs.transposed(0, 2, 1)
 
         let normedVisionOutputs = mmSoftEmbNorm(pooledVisionOutputs)
@@ -954,7 +955,6 @@ public struct Gemma3ProcessorConfiguration: Codable, Sendable {
 
 extension Gemma3: LoRAModel {
     public func loraLinearLayers() -> LoRALinearLayers {
-        // TODO: How do we implement this for Gemma 3?
-        return []
+        return languageModel.model.layers.map { ($0.selfAttention, ["q_proj", "v_proj"]) }
     }
 }
