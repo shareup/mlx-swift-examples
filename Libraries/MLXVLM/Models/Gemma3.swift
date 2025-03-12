@@ -901,30 +901,47 @@ public class Gemma3Processor: UserInputProcessor {
         )
     }
 
+    // TODO: This might need to be fixed
     private func replaceImageTokens(in tokens: [Int], imageCount: Int) throws -> [Int] {
-        // This is a placeholder implementation - you'll need to adapt this based on
-        // how Gemma 3 handles image tokens in the prompt
-
-        // Find image token placeholders and replace them with actual image tokens
+        // Count existing image tokens
         let imageTokenId = config.imageTokenId
+        let existingImageTokens = tokens.filter { $0 == imageTokenId }.count
 
-        // Simple implementation: just ensure there are enough image tokens
-        var result = tokens
-        var imageTokensFound = 0
-
-        for (i, token) in result.enumerated() {
-            if token == imageTokenId {
-                imageTokensFound += 1
-            }
+        // If we have exactly the right number of image tokens, no changes needed
+        if existingImageTokens == imageCount {
+            return tokens
         }
 
-        // If we don't have enough image tokens, add them at the beginning
-        if imageTokensFound < imageCount {
-            // This is a simplification - in a real implementation you'd need to
-            // insert them at appropriate positions based on the model's requirements
-            let additionalTokens = Array(
-                repeating: imageTokenId, count: imageCount - imageTokensFound)
+        // If we have too few image tokens, we need to add more
+        if existingImageTokens < imageCount {
+            // Find a suitable position to insert image tokens
+            // For Gemma 3, typically image tokens come before the text
+            // Look for the first non-image token that's not a special token
+
+            // This is a simplified approach - you might need to adjust based on tokenizer specifics
+            var result = tokens
+            let additionalTokens = Array(repeating: imageTokenId, count: imageCount - existingImageTokens)
+
+            // Insert at the beginning by default, but you might want to insert after any system prompt
+            // or before any specific marker in the prompt
             result = additionalTokens + result
+            return result
+        }
+
+        // If we have too many image tokens, we need to remove some
+        // This is a simplified approach - in practice, you might want to be more selective
+        var result = tokens
+        var tokensToRemove = existingImageTokens - imageCount
+
+        if tokensToRemove > 0 {
+            // Remove excess image tokens from the end of the sequence
+            result = result.filter { token in
+                if token == imageTokenId && tokensToRemove > 0 {
+                    tokensToRemove -= 1
+                    return false
+                }
+                return true
+            }
         }
 
         return result
