@@ -10,6 +10,7 @@ import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
+import MLXLLM
 
 // MARK: - Language
 

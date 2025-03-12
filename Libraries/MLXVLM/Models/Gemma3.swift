@@ -693,11 +693,11 @@ class Gemma3MultiModalProjector: Module, UnaryLayer {
     }
 }
 
-// MARK: - Gemma3 Model
+// MARK: - Gemma 3 Model
 
 public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
-    @ModuleInfo(key: "vision_tower") var visionTower: VisionModel
-    @ModuleInfo(key: "language_model") var languageModel: LanguageModel
+    @ModuleInfo(key: "vision_tower") private var visionTower: VisionModel
+    @ModuleInfo(key: "language_model") private var languageModel: LanguageModel
     @ModuleInfo(key: "multi_modal_projector") var multiModalProjector: Gemma3MultiModalProjector
 
     public let config: Gemma3Configuration
@@ -729,8 +729,8 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
             outputHiddenStates: true
         )
 
-        let imageFeatures = hiddenState[.newAxis, 0..., 0...].asType(pixelValues.dtype)
-        let imageFeatures = multiModalProjector(imageFeatures)
+        var imageFeatures = hiddenState[.newAxis, 0..., 0...]
+        imageFeatures = multiModalProjector(imageFeatures)
 
         return prepareInputsForMultimodal(
             imageFeatures: imageFeatures,
@@ -791,7 +791,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
             finalAttentionMask4d = expandedDimensions(finalAttentionMask4d!, axis: 1)
         }
 
-        return (MLXArray(finalEmbedding), finalAttentionMask4d)
+        return (finalEmbedding, finalAttentionMask4d)
     }
 
     public func prepare(_ input: LMInput, cache: [any KVCache], windowSize: Int?) throws
@@ -949,5 +949,12 @@ public struct Gemma3ProcessorConfiguration: Codable, Sendable {
         case imageMean = "image_mean"
         case imageStd = "image_std"
         case imageTokenId = "image_token_id"
+    }
+}
+
+extension Gemma3: LoRAModel {
+    public func loraLinearLayers() -> LoRALinearLayers {
+        // TODO: How do we implement this for Gemma 3?
+        return []
     }
 }
