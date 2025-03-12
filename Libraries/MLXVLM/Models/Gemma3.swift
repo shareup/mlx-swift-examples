@@ -4,6 +4,7 @@ import MLXFast
 import MLXLMCommon
 import MLXNN
 import Tokenizers
+import MLXLLM
 
 // Based on https://github.com/Blaizzy/mlx-vlm/tree/main/mlx_vlm/models/gemma3
 
@@ -99,29 +100,6 @@ public struct Gemma3Configuration: Codable, Sendable {
     }
 }
 
-// MARK: - RMSNorm
-
-class RMSNorm: Module, UnaryLayer {
-    @ModuleInfo var weight: MLXArray
-    let eps: Float
-
-    init(dimensions: Int, eps: Float = 1e-6) {
-        self._weight.wrappedValue = ones([dimensions])
-        self.eps = eps
-    }
-
-    func callAsFunction(_ x: MLXArray) -> MLXArray {
-        let origDtype = x.dtype
-        // Gemma3 is (x * w).to(float16)
-        let output = MLXFast.rmsNorm(
-            x.asType(.float32),
-            weight: 1.0 + weight.asType(.float32),
-            eps: eps
-        )
-        return output.asType(origDtype)
-    }
-}
-
 // MARK: - Attention
 
 class Attention: Module {
@@ -138,8 +116,8 @@ class Attention: Module {
     @ModuleInfo(key: "v_proj") var valueProj: Linear
     @ModuleInfo(key: "o_proj") var outputProj: Linear
 
-    @ModuleInfo(key: "q_norm") var queryNorm: RMSNorm
-    @ModuleInfo(key: "k_norm") var keyNorm: RMSNorm
+    @ModuleInfo(key: "q_norm") var queryNorm: GemmaUtils.RMSNorm
+    @ModuleInfo(key: "k_norm") var keyNorm: GemmaUtils.RMSNorm
 
     @ModuleInfo var rope: RoPE
 
@@ -158,8 +136,8 @@ class Attention: Module {
         self._valueProj.wrappedValue = Linear(dim, numKVHeads * headDim, bias: false)
         self._outputProj.wrappedValue = Linear(numHeads * headDim, dim, bias: false)
 
-        self._queryNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
-        self._keyNorm.wrappedValue = RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        self._queryNorm.wrappedValue = GemmaUtils.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
+        self._keyNorm.wrappedValue = GemmaUtils.RMSNorm(dimensions: headDim, eps: config.rmsNormEps)
 
         self.isSliding = (layerIdx + 1) % config.slidingWindowPattern != 0
 
@@ -245,10 +223,10 @@ class MLP: Module, UnaryLayer {
 class TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Attention
     @ModuleInfo var mlp: MLP
-    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
-    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
-    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: RMSNorm
-    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: GemmaUtils.RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: GemmaUtils.RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: GemmaUtils.RMSNorm
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: GemmaUtils.RMSNorm
 
     let numAttentionHeads: Int
     let hiddenSize: Int
@@ -260,13 +238,13 @@ class TransformerBlock: Module {
         self._selfAttention.wrappedValue = Attention(config: config, layerIdx: layerIdx)
         self.mlp = MLP(dimensions: config.hiddenSize, hiddenDimensions: config.intermediateSize)
 
-        self._inputLayerNorm.wrappedValue = RMSNorm(
+        self._inputLayerNorm.wrappedValue = GemmaUtils.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postAttentionLayerNorm.wrappedValue = RMSNorm(
+        self._postAttentionLayerNorm.wrappedValue = GemmaUtils.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._preFeedforwardLayerNorm.wrappedValue = RMSNorm(
+        self._preFeedforwardLayerNorm.wrappedValue = GemmaUtils.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postFeedforwardLayerNorm.wrappedValue = RMSNorm(
+        self._postFeedforwardLayerNorm.wrappedValue = GemmaUtils.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
     }
 
@@ -288,7 +266,7 @@ class TransformerBlock: Module {
 class GemmaModel: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [TransformerBlock]
-    @ModuleInfo var norm: RMSNorm
+    @ModuleInfo var norm: GemmaUtils.RMSNorm
 
     let config: Gemma3TextConfiguration
 
@@ -304,7 +282,7 @@ class GemmaModel: Module {
             TransformerBlock(config: config, layerIdx: layerIdx)
         }
 
-        self.norm = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self.norm = GemmaUtils.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
     }
 
     func callAsFunction(
@@ -346,7 +324,7 @@ class GemmaModel: Module {
 
 // MARK: - LanguageModel
 
-class LanguageModel: Module, KVCacheDimensionProvider {
+fileprivate class LanguageModel: Module, KVCacheDimensionProvider {
     @ModuleInfo var model: GemmaModel
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
@@ -388,7 +366,7 @@ class LanguageModel: Module, KVCacheDimensionProvider {
 
 // MARK: - Vision Model Components
 
-class VisionAttention: Module, UnaryLayer {
+private class VisionAttention: Module, UnaryLayer {
     @ModuleInfo(key: "q_proj") var queryProj: Linear
     @ModuleInfo(key: "k_proj") var keyProj: Linear
     @ModuleInfo(key: "v_proj") var valueProj: Linear
@@ -471,7 +449,7 @@ class VisionMLP: Module, UnaryLayer {
     }
 }
 
-class EncoderLayer: Module, UnaryLayer {
+private class EncoderLayer: Module, UnaryLayer {
     @ModuleInfo(key: "self_attn") var selfAttention: VisionAttention
     @ModuleInfo(key: "layer_norm1") var layerNorm1: LayerNorm
     @ModuleInfo var mlp: VisionMLP
@@ -501,7 +479,7 @@ class EncoderLayer: Module, UnaryLayer {
     }
 }
 
-class Encoder: Module {
+private class Encoder: Module {
     @ModuleInfo var layers: [EncoderLayer]
 
     init(config: Gemma3VisionConfiguration) {
@@ -574,7 +552,7 @@ class VisionEmbeddings: Module, UnaryLayer {
     }
 }
 
-class SigLipVisionModel: Module {
+private class SigLipVisionModel: Module {
     @ModuleInfo var embeddings: VisionEmbeddings
     @ModuleInfo var encoder: Encoder
     @ModuleInfo(key: "post_layernorm") var postLayerNorm: LayerNorm
@@ -603,7 +581,7 @@ class SigLipVisionModel: Module {
     }
 }
 
-class VisionModel: Module {
+private class VisionModel: Module {
     @ModuleInfo(key: "vision_model") var visionModel: SigLipVisionModel
 
     let modelType: String
@@ -660,7 +638,7 @@ class VisionModel: Module {
 
 class Gemma3MultiModalProjector: Module, UnaryLayer {
     @ModuleInfo(key: "mm_input_projection_weight") var mmInputProjectionWeight: MLXArray
-    @ModuleInfo(key: "mm_soft_emb_norm") var mmSoftEmbNorm: RMSNorm
+    @ModuleInfo(key: "mm_soft_emb_norm") var mmSoftEmbNorm: GemmaUtils.RMSNorm
     @ModuleInfo var avgPool: AvgPool2d
 
     let patchesPerImage: Int
@@ -673,7 +651,7 @@ class Gemma3MultiModalProjector: Module, UnaryLayer {
             config.textConfiguration.hiddenSize,
         ])
 
-        self._mmSoftEmbNorm.wrappedValue = RMSNorm(
+        self._mmSoftEmbNorm.wrappedValue = GemmaUtils.RMSNorm(
             dimensions: config.visionConfiguration.hiddenSize,
             eps: config.visionConfiguration.layerNormEps
         )
