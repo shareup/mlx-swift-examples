@@ -711,14 +711,14 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         pixelValues: MLXArray? = nil,
         mask: MLXArray? = nil
     ) -> (MLXArray, MLXArray?) {
-        if pixelValues == nil {
+        guard let pixelValues else {
             return (languageModel.model.embedTokens(inputIds!), nil)
         }
 
         let inputsEmbeds = languageModel.model.embedTokens(inputIds!)
 
         let (hiddenState, _, _) = visionTower(
-            pixelValues!.transposed(0, 2, 3, 1).asType(inputsEmbeds.dtype),  // TODO: Is force-unwrapping pixelValues correct?
+            pixelValues.transposed(0, 2, 3, 1).asType(inputsEmbeds.dtype),
             outputHiddenStates: true
         )
 
