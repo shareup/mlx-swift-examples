@@ -28,6 +28,7 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
     public var ropeLocalBaseFreq: Float = 10_000.0
     public var ropeTraditional: Bool = false
     public var queryPreAttnScalar: Float = 0.0625
+    public var mmTokensPerImage: Int = 256
     public var slidingWindowPattern: Int = 6
 
     enum CodingKeys: String, CodingKey {
@@ -43,19 +44,15 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
 // MARK: - Vision Configuration
 
 public struct Gemma3VisionConfiguration: Codable, Sendable {
-    public enum VisionModelType: String, Codable {
-        case siglipVisionModel = "siglip_vision_model"
-        case gemma3 = "gemma3"
-        case gemma3Vision = "gemma3_vision"
-    }
-
-    public let modelType: VisionModelType
+    public let modelType: String
     public let hiddenLayers: Int
     public let hiddenSize: Int
     public let intermediateSize: Int
     public let attentionHeads: Int
     public let patchSize: Int
     public let imageSize: Int
+    public let visionUseHead: Bool
+    public let skipVision: Bool
 
     // Default values
     public var numChannels: Int = 3
@@ -69,6 +66,20 @@ public struct Gemma3VisionConfiguration: Codable, Sendable {
         case attentionHeads = "num_attention_heads"
         case patchSize = "patch_size"
         case imageSize = "image_size"
+        case visionUseHead = "vision_use_head"
+        case skipVision = "skip_vision"
+    }
+}
+
+// MARK: - Quantization Configuration
+
+public struct QuantizationConfig: Codable, Sendable {
+    public let groupSize: Int
+    public let bits: Int
+
+    enum CodingKeys: String, CodingKey {
+        case groupSize = "group_size"
+        case bits
     }
 }
 
@@ -78,8 +89,16 @@ public struct Gemma3Configuration: Codable, Sendable {
     public let textConfiguration: Gemma3TextConfiguration
     public let visionConfiguration: Gemma3VisionConfiguration
     public let modelType: String
+    public let architectures: [String]
     public let imageTokenIndex: Int
     public let mmTokensPerImage: Int
+    public let boiTokenIndex: Int
+    public let eoiTokenIndex: Int
+    public let eosTokenId: [Int]
+    public let torchDtype: String
+    public let transformersVersion: String
+    public let quantization: QuantizationConfig?
+    public let initializerRange: Float
 
     // Default values
     public var vocabularySize: Int = 257152
@@ -91,8 +110,16 @@ public struct Gemma3Configuration: Codable, Sendable {
         case textConfiguration = "text_config"
         case visionConfiguration = "vision_config"
         case modelType = "model_type"
+        case architectures
         case imageTokenIndex = "image_token_index"
         case mmTokensPerImage = "mm_tokens_per_image"
+        case boiTokenIndex = "boi_token_index"
+        case eoiTokenIndex = "eoi_token_index"
+        case eosTokenId = "eos_token_id"
+        case torchDtype = "torch_dtype"
+        case transformersVersion = "transformers_version"
+        case quantization
+        case initializerRange = "initializer_range"
     }
 }
 
@@ -589,7 +616,7 @@ private class SigLipVisionModel: Module {
 private class VisionModel: Module {
     @ModuleInfo(key: "vision_model") var visionModel: SigLipVisionModel
 
-    let modelType: Gemma3VisionConfiguration.VisionModelType
+    let modelType: String
 
     init(config: Gemma3VisionConfiguration) {
         self.modelType = config.modelType
@@ -907,10 +934,37 @@ public class Gemma3Processor: UserInputProcessor {
 }
 
 public struct Gemma3ProcessorConfiguration: Codable, Sendable {
-    public let imageSize: Int
+    // Fields from the preprocessor_config.json
+    public let processorClass: String
+    public let imageProcessorType: String
+    public let doNormalize: Bool
+    public let doRescale: Bool
+    public let doResize: Bool
     public let imageMean: [CGFloat]
     public let imageStd: [CGFloat]
-    public let imageTokenId: Int
+    public let imageSeqLength: Int
+    public let resample: Int
+    public let rescaleFactor: Float
+    public let size: ImageSize
+
+    // Optional fields
+    public let doConvertRgb: Bool?
+    public let doPanAndScan: Bool?
+    public let panAndScanMaxNumCrops: Int?
+    public let panAndScanMinCropSize: Int?
+    public let panAndScanMinRatioToActivate: Float?
+
+    // Hard-coded value from Gemma3 config.json
+    // TODO: Check if there's a better solution than hard-coding this
+    public let imageTokenId: Int = 262144
+
+    public struct ImageSize: Codable, Sendable {
+        public let height: Int
+        public let width: Int
+    }
+
+    // Computed properties for convenience
+    public var imageSize: Int { size.height }
 
     public var imageMeanTuple: (CGFloat, CGFloat, CGFloat) {
         (imageMean[0], imageMean[1], imageMean[2])
@@ -921,10 +975,23 @@ public struct Gemma3ProcessorConfiguration: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case imageSize = "image_size"
+        case processorClass = "processor_class"
+        case imageProcessorType = "image_processor_type"
+        case doNormalize = "do_normalize"
+        case doRescale = "do_rescale"
+        case doResize = "do_resize"
+        case doConvertRgb = "do_convert_rgb"
+        case doPanAndScan = "do_pan_and_scan"
         case imageMean = "image_mean"
         case imageStd = "image_std"
-        case imageTokenId = "image_token_id"
+        case imageSeqLength = "image_seq_length"
+        case resample
+        case rescaleFactor = "rescale_factor"
+        case size
+        case panAndScanMaxNumCrops = "pan_and_scan_max_num_crops"
+        case panAndScanMinCropSize = "pan_and_scan_min_crop_size"
+        case panAndScanMinRatioToActivate = "pan_and_scan_min_ratio_to_activate"
+        // imageTokenId is not decoded from JSON
     }
 }
 
