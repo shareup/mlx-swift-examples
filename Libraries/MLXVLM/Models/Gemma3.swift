@@ -15,38 +15,28 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
     public let hiddenSize: Int
     public let hiddenLayers: Int
     public let intermediateSize: Int
-    public let attentionHeads: Int
-    public let headDim: Int
-    public let rmsNormEps: Float
-    public let vocabularySize: Int
-    public let kvHeads: Int
-    public let ropeGlobalBaseFreq: Float
-    public let ropeLocalBaseFreq: Float
-    public let ropeTraditional: Bool
-    public let queryPreAttnScalar: Float
     public let slidingWindow: Int
     public let ropeScaling: [String: StringOrNumber]?
-    public let mmTokensPerImage: Int
-    public let slidingWindowPattern: Int
+
+    // Calculated or default values
+    public var attentionHeads: Int { hiddenSize / headDim }
+    public var headDim: Int = 256
+    public var rmsNormEps: Float = 1.0e-6
+    public var vocabularySize: Int = 262208
+    public var kvHeads: Int = 4
+    public var ropeGlobalBaseFreq: Float = 1_000_000.0
+    public var ropeLocalBaseFreq: Float = 10_000.0
+    public var ropeTraditional: Bool = false
+    public var queryPreAttnScalar: Float = 0.0625
+    public var slidingWindowPattern: Int = 6
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
         case hiddenSize = "hidden_size"
         case hiddenLayers = "num_hidden_layers"
         case intermediateSize = "intermediate_size"
-        case attentionHeads = "num_attention_heads"
-        case headDim = "head_dim"
-        case rmsNormEps = "rms_norm_eps"
-        case vocabularySize = "vocab_size"
-        case kvHeads = "num_key_value_heads"
-        case ropeGlobalBaseFreq = "rope_global_base_freq"
-        case ropeLocalBaseFreq = "rope_local_base_freq"
-        case ropeTraditional = "rope_traditional"
-        case queryPreAttnScalar = "query_pre_attn_scalar"
         case slidingWindow = "sliding_window"
         case ropeScaling = "rope_scaling"
-        case mmTokensPerImage = "mm_tokens_per_image"
-        case slidingWindowPattern = "sliding_window_pattern"
     }
 }
 
@@ -60,8 +50,10 @@ public struct Gemma3VisionConfiguration: Codable, Sendable {
     public let attentionHeads: Int
     public let patchSize: Int
     public let imageSize: Int
-    public let numChannels: Int
-    public let layerNormEps: Float
+
+    // Default values
+    public var numChannels: Int = 3
+    public var layerNormEps: Float = 1e-6
 
     enum CodingKeys: String, CodingKey {
         case modelType = "model_type"
@@ -71,8 +63,6 @@ public struct Gemma3VisionConfiguration: Codable, Sendable {
         case attentionHeads = "num_attention_heads"
         case patchSize = "patch_size"
         case imageSize = "image_size"
-        case numChannels = "num_channels"
-        case layerNormEps = "layer_norm_eps"
     }
 }
 
@@ -82,21 +72,21 @@ public struct Gemma3Configuration: Codable, Sendable {
     public let textConfiguration: Gemma3TextConfiguration
     public let visionConfiguration: Gemma3VisionConfiguration
     public let modelType: String
-    public let vocabularySize: Int
-    public let ignoreIndex: Int
     public let imageTokenIndex: Int
-    public let hiddenSize: Int
-    public let padTokenId: Int
+    public let mmTokensPerImage: Int
+
+    // Default values
+    public var vocabularySize: Int = 257152
+    public var ignoreIndex: Int = -100
+    public var hiddenSize: Int = 2048
+    public var padTokenId: Int = 0
 
     enum CodingKeys: String, CodingKey {
         case textConfiguration = "text_config"
         case visionConfiguration = "vision_config"
         case modelType = "model_type"
-        case vocabularySize = "vocab_size"
-        case ignoreIndex = "ignore_index"
         case imageTokenIndex = "image_token_index"
-        case hiddenSize = "hidden_size"
-        case padTokenId = "pad_token_id"
+        case mmTokensPerImage = "mm_tokens_per_image"
     }
 }
 
@@ -561,6 +551,7 @@ private class SigLipVisionModel: Module {
     init(config: Gemma3VisionConfiguration) {
         self.embeddings = VisionEmbeddings(config: config)
         self.encoder = Encoder(config: config)
+        super.init()
         self.postLayerNorm = LayerNorm(dimensions: config.hiddenSize)
     }
 
@@ -659,7 +650,8 @@ class Gemma3MultiModalProjector: Module, UnaryLayer {
 
         self.patchesPerImage =
             config.visionConfiguration.imageSize / config.visionConfiguration.patchSize
-        self.tokensPerSide = Int(sqrt(Double(config.textConfiguration.mmTokensPerImage)))
+
+        self.tokensPerSide = Int(sqrt(Double(config.mmTokensPerImage)))
         self.kernelSize = patchesPerImage / tokensPerSide
 
         self.avgPool = AvgPool2d(
@@ -679,7 +671,7 @@ class Gemma3MultiModalProjector: Module, UnaryLayer {
         // Transpose to place h, w in indices 1, 2
         reshapedVisionOutputs = reshapedVisionOutputs.transposed(0, 2, 3, 1)
         var pooledVisionOutputs = avgPool(reshapedVisionOutputs)
-        pooledVisionOutputs = pooledVisionOutputs.transposed(0, 3, 1, 2).flattened(start: 2) // TODO: Check if .flattened(start: 2) is correct
+        pooledVisionOutputs = pooledVisionOutputs.transposed(0, 3, 1, 2).flattened(start: 2)
         pooledVisionOutputs = pooledVisionOutputs.transposed(0, 2, 1)
 
         let normedVisionOutputs = mmSoftEmbNorm(pooledVisionOutputs)
@@ -747,17 +739,21 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray,
         attentionMask: MLXArray?
     ) -> (MLXArray, MLXArray?) {
-        let embedDim = imageFeatures.shape[2]
+        let embedDim = imageFeatures.dim(2)
 
-        let batchSize = inputIds.shape[0]
-        let sequenceLength = inputIds.shape[1]
+        let batchSize = inputIds.dim(0)
+        let sequenceLength = inputIds.dim(1)
         let scaledImageFeatures = imageFeatures / sqrt(Float(config.hiddenSize))
-        var finalEmbedding = MLXArray.zeros([batchSize, sequenceLength, embedDim])  // TODO: Is this correct?
+        var finalEmbedding = MLXArray.zeros([batchSize, sequenceLength, embedDim])
 
         let padTokenId = config.padTokenId
-        let textMask = (inputIds .!= config.imageTokenIndex) .& (inputIds .!= padTokenId)
-        let imageMask = inputIds .== config.imageTokenIndex
-        let padMask = inputIds .== padTokenId
+
+        let textMask = MLX.logicalAnd(
+            MLX.notEqual(inputIds, MLXArray(config.imageTokenIndex)),
+            MLX.notEqual(inputIds, MLXArray(padTokenId))
+        )
+        let imageMask = MLX.equal(inputIds, MLXArray(config.imageTokenIndex))
+        let padMask = MLX.equal(inputIds, MLXArray(padTokenId))
 
         // Expand masks to match embedding dimension
         var textMaskExpanded = expandedDimensions(textMask, axis: -1)
@@ -770,17 +766,31 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         finalEmbedding = MLX.where(
             padMaskExpanded, MLXArray.zeros(like: finalEmbedding), finalEmbedding)
 
-        let padSize = finalEmbedding.dim(1) - scaledImageFeatures.dim(1)
-        let scaledImageFeaturesPadded = padded(
-            scaledImageFeatures,
-            widths: [IntOrPair((0, 0)), IntOrPair((0, padSize)), IntOrPair((0, 0))]
-        )
+        let inputIdsArray = inputIds.asArray(Int.self)
+        let flatInputIds = Array(inputIdsArray.flatMap { $0 })  // Flatten the array if it's 2D
 
-        // Insert image embeddings
-        var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
-        imageMaskExpanded = repeated(imageMaskExpanded, count: embedDim, axis: -1)
-        finalEmbedding = MLX.where(imageMaskExpanded, scaledImageFeaturesPadded, finalEmbedding)
+        // Find positions of image tokens
+        let imageTokenPositions = flatInputIds.enumerated()
+            .filter { $0.element == config.imageTokenIndex }
+            .map { $0.offset }
 
+        // Check if number of image tokens matches number of image features
+        let imageCount = imageFeatures.dim(1)
+        guard imageTokenPositions.count == imageCount else {
+            fatalError(
+                "Number of image tokens (\(imageTokenPositions.count)) doesn't match number of image features (\(imageCount))"
+            )
+        }
+
+        // Insert each image feature at its corresponding token position
+        for (i, position) in imageTokenPositions.enumerated() {
+            if i < imageCount {
+                let imageFeature = scaledImageFeatures[0, i, 0...]
+                finalEmbedding[0, position, 0...] = imageFeature
+            }
+        }
+
+        // Apply padding mask again to ensure zeros in pad positions
         finalEmbedding = MLX.where(
             padMaskExpanded, MLXArray.zeros(like: finalEmbedding), finalEmbedding)
 
@@ -867,15 +877,8 @@ public class Gemma3Processor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = input.prompt.asMessages()
 
-        // Tokenize the text
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
-
-        // Text-only input
-        if input.images.isEmpty {
-            let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
-            let mask = ones(like: promptArray).asType(.int8)
-            return LMInput(text: .init(tokens: promptArray, mask: mask))
-        }
+        // Tokenize the messages - assuming they already have the correct structure
+        let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
 
         // Process images if any
         var processedImage: LMInput.ProcessedImage?
@@ -889,8 +892,14 @@ public class Gemma3Processor: UserInputProcessor {
                 frames: imagePixelsAndFrames.map { $0.1 }
             )
 
-            // Replace image tokens if needed
-            promptTokens = try replaceImageTokens(in: promptTokens, imageCount: input.images.count)
+            // Verify that the number of image tokens matches the number of images
+            let imageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
+
+            if imageTokenCount != input.images.count {
+                throw VLMError.processing(
+                    "Number of image tokens (\(imageTokenCount)) does not match number of images (\(input.images.count))"
+                )
+            }
         }
 
         let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
@@ -899,52 +908,6 @@ public class Gemma3Processor: UserInputProcessor {
             text: .init(tokens: promptArray, mask: mask),
             image: processedImage
         )
-    }
-
-    // TODO: This might need to be fixed
-    private func replaceImageTokens(in tokens: [Int], imageCount: Int) throws -> [Int] {
-        // Count existing image tokens
-        let imageTokenId = config.imageTokenId
-        let existingImageTokens = tokens.filter { $0 == imageTokenId }.count
-
-        // If we have exactly the right number of image tokens, no changes needed
-        if existingImageTokens == imageCount {
-            return tokens
-        }
-
-        // If we have too few image tokens, we need to add more
-        if existingImageTokens < imageCount {
-            // Find a suitable position to insert image tokens
-            // For Gemma 3, typically image tokens come before the text
-            // Look for the first non-image token that's not a special token
-
-            // This is a simplified approach - you might need to adjust based on tokenizer specifics
-            var result = tokens
-            let additionalTokens = Array(repeating: imageTokenId, count: imageCount - existingImageTokens)
-
-            // Insert at the beginning by default, but you might want to insert after any system prompt
-            // or before any specific marker in the prompt
-            result = additionalTokens + result
-            return result
-        }
-
-        // If we have too many image tokens, we need to remove some
-        // This is a simplified approach - in practice, you might want to be more selective
-        var result = tokens
-        var tokensToRemove = existingImageTokens - imageCount
-
-        if tokensToRemove > 0 {
-            // Remove excess image tokens from the end of the sequence
-            result = result.filter { token in
-                if token == imageTokenId && tokensToRemove > 0 {
-                    tokensToRemove -= 1
-                    return false
-                }
-                return true
-            }
-        }
-
-        return result
     }
 }
 
