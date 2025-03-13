@@ -43,7 +43,13 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
 // MARK: - Vision Configuration
 
 public struct Gemma3VisionConfiguration: Codable, Sendable {
-    public let modelType: String
+    public enum VisionModelType: String, Codable {
+        case siglipVisionModel = "siglip_vision_model"
+        case gemma3 = "gemma3"
+        case gemma3Vision = "gemma3_vision"
+    }
+
+    public let modelType: VisionModelType
     public let hiddenLayers: Int
     public let hiddenSize: Int
     public let intermediateSize: Int
@@ -576,15 +582,10 @@ private class SigLipVisionModel: Module {
 private class VisionModel: Module {
     @ModuleInfo(key: "vision_model") var visionModel: SigLipVisionModel
 
-    let modelType: String
+    let modelType: Gemma3VisionConfiguration.VisionModelType
 
     init(config: Gemma3VisionConfiguration) {
         self.modelType = config.modelType
-
-        if !["siglip_vision_model", "gemma3", "gemma3_vision"].contains(modelType) {
-            fatalError("Unsupported model type: \(modelType)")
-        }
-
         self._visionModel.wrappedValue = SigLipVisionModel(config: config)
     }
 
