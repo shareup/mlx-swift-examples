@@ -551,8 +551,8 @@ private class SigLipVisionModel: Module {
     init(config: Gemma3VisionConfiguration) {
         self.embeddings = VisionEmbeddings(config: config)
         self.encoder = Encoder(config: config)
+        self._postLayerNorm.wrappedValue = LayerNorm(dimensions: config.hiddenSize)
         super.init()
-        self.postLayerNorm = LayerNorm(dimensions: config.hiddenSize)
     }
 
     func callAsFunction(
