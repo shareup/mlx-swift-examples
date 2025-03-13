@@ -899,8 +899,14 @@ public class Gemma3Processor: UserInputProcessor {
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = input.prompt.asMessages()
 
+        print("Messages before tokenization:", messages)
+
         // Tokenize the messages - assuming they already have the correct structure
         let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+
+        print("Prompt token IDs:", Set(promptTokens))
+        let decoded = try tokenizer.decode(tokens: promptTokens)
+        print("Decoded prompt tokens: \(decoded)")
 
         // Process images if any
         var processedImage: LMInput.ProcessedImage?
