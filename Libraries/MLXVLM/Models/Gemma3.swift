@@ -739,7 +739,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         inputIds: MLXArray,
         attentionMask: MLXArray?
     ) -> (MLXArray, MLXArray?) {
-        let embedDim = imageFeatures.dim(2)
+        let (_, _, embedDim) = (imageFeatures.dim(0), imageFeatures.dim(1), imageFeatures.dim(2))
 
         let batchSize = inputIds.dim(0)
         let sequenceLength = inputIds.dim(1)
@@ -748,6 +748,7 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
 
         let padTokenId = config.padTokenId
 
+        // Create masks for text, image, and padding tokens
         let textMask = MLX.logicalAnd(
             MLX.notEqual(inputIds, MLXArray(config.imageTokenIndex)),
             MLX.notEqual(inputIds, MLXArray(padTokenId))
@@ -758,39 +759,25 @@ public class Gemma3: Module, VLMModel, KVCacheDimensionProvider {
         // Expand masks to match embedding dimension
         var textMaskExpanded = expandedDimensions(textMask, axis: -1)
         textMaskExpanded = repeated(textMaskExpanded, count: embedDim, axis: -1)
+        var imageMaskExpanded = expandedDimensions(imageMask, axis: -1)
+        imageMaskExpanded = repeated(imageMaskExpanded, count: embedDim, axis: -1)
         var padMaskExpanded = expandedDimensions(padMask, axis: -1)
         padMaskExpanded = repeated(padMaskExpanded, count: embedDim, axis: -1)
 
-        // Insert padding and text token embeddings
+        // Insert text token embeddings
         finalEmbedding = MLX.where(textMaskExpanded, inputsEmbeds, finalEmbedding)
-        finalEmbedding = MLX.where(
-            padMaskExpanded, MLXArray.zeros(like: finalEmbedding), finalEmbedding)
 
-        let inputIdsArray = inputIds.asArray(Int.self)
-        let flatInputIds = Array(inputIdsArray.flatMap { $0 })  // Flatten the array if it's 2D
+        // Pad scaled_image_features to match the sequence length
+        let padSize = finalEmbedding.dim(1) - scaledImageFeatures.dim(1)
+        let paddedImageFeatures = MLX.padded(
+            scaledImageFeatures,
+            widths: [IntOrPair((0, 0)), IntOrPair((0, padSize)), IntOrPair((0, 0))]
+        )
 
-        // Find positions of image tokens
-        let imageTokenPositions = flatInputIds.enumerated()
-            .filter { $0.element == config.imageTokenIndex }
-            .map { $0.offset }
+        // Insert image embeddings
+        finalEmbedding = MLX.where(imageMaskExpanded, paddedImageFeatures, finalEmbedding)
 
-        // Check if number of image tokens matches number of image features
-        let imageCount = imageFeatures.dim(1)
-        guard imageTokenPositions.count == imageCount else {
-            fatalError(
-                "Number of image tokens (\(imageTokenPositions.count)) doesn't match number of image features (\(imageCount))"
-            )
-        }
-
-        // Insert each image feature at its corresponding token position
-        for (i, position) in imageTokenPositions.enumerated() {
-            if i < imageCount {
-                let imageFeature = scaledImageFeatures[0, i, 0...]
-                finalEmbedding[0, position, 0...] = imageFeature
-            }
-        }
-
-        // Apply padding mask again to ensure zeros in pad positions
+        // Apply padding mask to ensure zeros in pad positions
         finalEmbedding = MLX.where(
             padMaskExpanded, MLXArray.zeros(like: finalEmbedding), finalEmbedding)
 
