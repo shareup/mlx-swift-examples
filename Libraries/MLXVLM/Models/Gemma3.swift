@@ -18,8 +18,8 @@ public struct Gemma3TextConfiguration: Codable, Sendable {
     public let slidingWindow: Int
     public let ropeScaling: [String: StringOrNumber]?
 
-    // Calculated or default values
-    public var attentionHeads: Int { hiddenSize / headDim }
+    // Default values
+    public var attentionHeads: Int = 8
     public var headDim: Int = 256
     public var rmsNormEps: Float = 1.0e-6
     public var vocabularySize: Int = 262208
