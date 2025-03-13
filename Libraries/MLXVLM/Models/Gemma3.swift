@@ -183,6 +183,13 @@ private class Attention: Module {
             }
         }
 
+        // Handle key-value head repetition
+        if repeats > 1 {
+            // Repeat keys and values to match the number of query heads
+            keys = repeated(keys, count: repeats, axis: 1)
+            values = repeated(values, count: repeats, axis: 1)
+        }
+
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
             keys: keys,
