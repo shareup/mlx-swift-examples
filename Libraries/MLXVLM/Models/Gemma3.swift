@@ -872,10 +872,9 @@ public class Gemma3Processor: UserInputProcessor {
     public func preprocess(images: [CIImage], processing: UserInput.Processing?) throws -> (
         MLXArray, THW
     ) {
-        // Apply user requested processing if any
+        // Implementation unchanged
         let images = images.map { MediaProcessing.apply($0, processing: processing) }
 
-        // Process images
         let processedImages =
             try images
             .map { MediaProcessing.inSRGBToneCurveSpace($0) }
@@ -889,10 +888,8 @@ public class Gemma3Processor: UserInputProcessor {
             }
             .map { MediaProcessing.asMLXArray($0) }
 
-        // Concatenate images
         let pixelValues = concatenated(processedImages)
 
-        // Return the processed image and frame info
         return (pixelValues, THW(images.count, config.imageSize, config.imageSize))
     }
 
@@ -901,15 +898,17 @@ public class Gemma3Processor: UserInputProcessor {
 
         print("Messages before tokenization:", messages)
 
-        // Tokenize the messages - assuming they already have the correct structure
+        // Tokenize the messages using the chat template
         let promptTokens = try tokenizer.applyChatTemplate(messages: messages)
 
-        print("Prompt token IDs:", Set(promptTokens))
+        print("Prompt token IDs:", promptTokens)
         let decoded = try tokenizer.decode(tokens: promptTokens)
         print("Decoded prompt tokens: \(decoded)")
 
         // Process images if any
         var processedImage: LMInput.ProcessedImage?
+        var finalPromptTokens = promptTokens
+
         if !input.images.isEmpty {
             let imagePixelsAndFrames = try input.images.map {
                 try preprocess(images: [$0.asCIImage()], processing: input.processing)
@@ -920,17 +919,67 @@ public class Gemma3Processor: UserInputProcessor {
                 frames: imagePixelsAndFrames.map { $0.1 }
             )
 
-            // Verify that the number of image tokens matches the number of images
-            let imageTokenCount = promptTokens.filter { $0 == config.imageTokenId }.count
+            // Find all occurrences of the beginning of image token
+            let boiTokenId = 255999  // From config.json
 
-            if imageTokenCount != input.images.count {
+            var boiTokenIndices = [Int]()
+
+            for (i, token) in promptTokens.enumerated() {
+                if token == boiTokenId {
+                    boiTokenIndices.append(i)
+                }
+            }
+
+            // Make sure we have the right number of image tokens
+            guard boiTokenIndices.count == input.images.count else {
                 throw VLMError.processing(
-                    "Number of image tokens (\(imageTokenCount)) does not match number of images (\(input.images.count))"
+                    "Number of image tokens (\(boiTokenIndices.count)) does not match number of images (\(input.images.count))"
                 )
             }
+
+            // Replace each BOI token with the full sequence
+            var result = [Int]()
+            var currentIndex = 0
+
+            for boiIndex in boiTokenIndices {
+                // Add tokens before the BOI token
+                result.append(contentsOf: promptTokens[currentIndex ..< boiIndex])
+
+                // Add newlines before the BOI token
+                result.append(108)  // Token for two newlines
+
+                // Add the BOI token
+                result.append(boiTokenId)
+
+                // Add the image tokens
+                let imageTokenId = 262144  // From config.json
+                result.append(
+                    contentsOf: Array(repeating: imageTokenId, count: config.imageSeqLength))
+
+                // Add the EOI token
+                let eoiTokenId = 256000  // From config.json
+                result.append(eoiTokenId)
+
+                // Add newlines after the EOI token
+                result.append(108)  // Token for two newlines
+
+                // Update current index to after the BOI token
+                currentIndex = boiIndex + 1
+            }
+
+            // Add any remaining tokens
+            if currentIndex < promptTokens.count {
+                result.append(contentsOf: promptTokens[currentIndex...])
+            }
+
+            finalPromptTokens = result
+
+            print("Final prompt token IDs:", finalPromptTokens)
+            let decodedFinal = try tokenizer.decode(tokens: finalPromptTokens)
+            print("Decoded final prompt tokens: \(decodedFinal)")
         }
 
-        let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
+        let promptArray = MLXArray(finalPromptTokens).expandedDimensions(axis: 0)
         let mask = ones(like: promptArray).asType(.int8)
         return LMInput(
             text: .init(tokens: promptArray, mask: mask),
@@ -962,7 +1011,7 @@ public struct Gemma3ProcessorConfiguration: Codable, Sendable {
 
     // Hard-coded value from Gemma3 config.json
     // TODO: Check if there's a better solution than hard-coding this
-    public let imageTokenId: Int = 262144
+    public let imageTokenId: Int = 255999  // 262144
 
     public struct ImageSize: Codable, Sendable {
         public let height: Int
