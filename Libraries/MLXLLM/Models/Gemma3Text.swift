@@ -10,6 +10,7 @@
 import Foundation
 import MLX
 import MLXFast
+import MLXLLM
 import MLXLMCommon
 import MLXNN
 
@@ -146,13 +147,33 @@ private class Attention: Module {
 
         var localMask = mask
 
-        if let cache = cache {
+        if let cache {
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
+
+            // For generation with cache, create a mask if none was provided
+            if localMask == nil && L == 1 && cache.offset > 0 {
+                // Create a mask that allows attending to all previous tokens
+                let size = cache.offset + L
+                localMask = MLXArray.zeros([1, 1, L, size])
+            }
         } else {
             queries = rope(queries)
             keys = rope(keys)
+
+            // For training or initial generation, create a causal mask if none was provided
+            if localMask == nil && L > 1 {
+                // Create a causal mask using MLXArray operations instead of loops
+                let rows = MLXArray.arange(L).reshaped(L, 1)
+                let cols = MLXArray.arange(L).reshaped(1, L)
+                let causalMask = rows .>= cols  // This creates a boolean mask where rows >= cols (lower triangular)
+
+                // Convert to attention mask format
+                let attentionMask = causalMask.asType(.float32)  // Convert to float
+                let negativeAttentionMask = (1 - attentionMask) * Float32(-1e9)
+                localMask = negativeAttentionMask.reshaped(1, 1, L, L)
+            }
         }
 
         // Sliding window mask adjustment
@@ -160,6 +181,12 @@ private class Attention: Module {
             let keyLen = keys.dim(-2)
             localMask = localMask![0..., 0..., 0..., (localMask!.dim(-1) - keyLen)...]
         }
+
+        // Print debug info
+        print("Attention input shape:", x.shape)
+        print("Queries shape:", queries.shape)
+        print("Keys shape:", keys.shape)
+        print("Mask shape:", localMask?.shape ?? "nil")
 
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
@@ -224,9 +251,10 @@ private class TransformerBlock: Module {
 
     func callAsFunction(
         _ x: MLXArray,
-        mask: MLXArray? = nil
+        mask: MLXArray? = nil,
+        cache: KVCache? = nil
     ) -> MLXArray {
-        let r = selfAttention(inputLayerNorm(x), mask: mask, cache: nil)
+        let r = selfAttention(inputLayerNorm(x), mask: mask, cache: cache)
         let h = x + postAttentionLayerNorm(r)
         let r2 = mlp(preFeedforwardLayerNorm(h))
         let out = h + postFeedforwardLayerNorm(r2)
@@ -258,16 +286,92 @@ private class Gemma3Model: Module {
         super.init()
     }
 
-    func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil) -> MLXArray {
-        var h = embedTokens(inputs)
-        h = h * sqrt(Float(config.hiddenSize))
+    private func createAdditiveCausalMask(n: Int, offset: Int) -> MLXArray {
+        let rinds = MLXArray(Int32(0) ..< Int32(offset + n))
+        let linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
+        let mask = linds[0..., .newAxis] .< rinds[.newAxis]
+        // Make sure the mask has shape [1, 1, n, offset+n]
+        return (mask * Float32(-1e9)).reshaped(1, 1, n, offset + n)
+    }
 
+    // Create attention mask with sliding window support
+    func createAttentionMask(h: MLXArray, cache: [KVCache]?) -> MLXArray? {
+        let t = h.dim(1)
+
+        var offset = 0
+        if let cache = cache, !cache.isEmpty, let firstCache = cache.first(where: { $0 != nil }) {
+            offset = firstCache.offset
+        }
+
+        // Even for t=1, we need a mask during generation to attend to previous tokens
+        if t == 1 && offset > 0 {
+            // For single token generation with history, create a mask that allows
+            // attending to all previous tokens
+            let size = offset + t
+            var mask = MLXArray.zeros([1, 1, t, size])
+
+            // Set all positions to valid (0) since we want to attend to all previous tokens
+            // No need to modify the mask as causal attention is implicit here
+            return mask.asType(h.dtype)
+        } else if t <= 1 && offset == 0 {
+            // No mask needed for the very first token
+            return nil
+        }
+
+        // Create basic causal mask for multi-token processing
+        var mask = createAdditiveCausalMask(n: t, offset: offset).asType(h.dtype)
+
+        // For sliding window attention, we need to limit the attention span
+        if config.slidingWindow > 0 && (t + offset) > config.slidingWindow {
+            // Create position indices
+            let posRows = MLXArray(Int32(offset) ..< Int32(offset + t))
+            let posCols = MLXArray(Int32(0) ..< Int32(offset + t))
+
+            // Calculate position differences
+            let posRowsExpanded = posRows[0..., .newAxis]
+            let posColsExpanded = posCols[.newAxis]
+            let posDiff = posRowsExpanded - posColsExpanded
+
+            // Create sliding window mask: True where distance > slidingWindow
+            let slidingWindowValue = MLXArray(Int32(config.slidingWindow))
+            let slidingWindowMask = posDiff .> slidingWindowValue
+
+            // Convert to attention mask values (-1e9 where True, 0 where False)
+            let slidingWindowValues = slidingWindowMask * Float32(-1e9)
+
+            // Reshape to [1, 1, t, offset+t] for attention
+            let slidingWindowMaskReshaped = slidingWindowValues.reshaped(1, 1, t, offset + t)
+
+            // Add to the causal mask
+            mask = mask + slidingWindowMaskReshaped
+        }
+
+        return mask
+    }
+
+    func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil, cache: [KVCache]? = nil)
+        -> MLXArray
+    {
+        var h = embedTokens(inputs)
+        let scaleFactor = MLXArray(sqrt(Float(config.hiddenSize))).asType(h.dtype)
+        h = h * scaleFactor
+
+        var localCache = cache
+
+        // If no mask is provided, create appropriate masks
         var fullMask: MLXArray? = nil
         var slidingWindowMask: MLXArray? = nil
 
         if mask == nil {
-            let j = config.slidingWindowPattern
-            slidingWindowMask = createAttentionMask(h: h, cache: nil)
+            // Create the standard causal mask
+            fullMask = createAttentionMask(h: h, cache: localCache)
+
+            // For sliding window layers, we need a different mask
+            if config.slidingWindow > 0 {
+                // Create a sliding window mask by modifying the full mask
+                slidingWindowMask = createAttentionMask(h: h, cache: localCache)
+                // The sliding window logic is already handled in createAttentionMask
+            }
         }
 
         for (i, layer) in layers.enumerated() {
@@ -278,7 +382,13 @@ private class Gemma3Model: Module {
                 layerMask = isSliding ? slidingWindowMask : fullMask
             }
 
-            h = layer(h, mask: layerMask)
+            // Debug print for first few layers
+            if i < 3 {
+                print("Layer \(i) mask shape:", layerMask?.shape ?? "nil")
+            }
+
+            let layerCache = localCache?[i]
+            h = layer(h, mask: layerMask, cache: layerCache)
         }
 
         return norm(h)
@@ -308,8 +418,24 @@ public class Gemma3TextModel: Module, LLMModel, KVCacheDimensionProvider {
         super.init()
     }
 
-    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
-        let out = model(inputs, mask: nil)
+    public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
+        // Explicitly create a mask for autoregressive generation
+        var mask: MLXArray? = nil
+
+        if inputs.dim(1) == 1 && cache != nil && !cache!.isEmpty {
+            // For single token generation with cache, create a mask that allows
+            // attending to all previous tokens
+            if let firstCache = cache!.first(where: { $0 != nil }) {
+                let offset = firstCache.offset
+                if offset > 0 {
+                    // Create a mask that allows the current token to attend to all previous tokens
+                    let size = offset + 1  // +1 for the current token
+                    mask = MLXArray.zeros([1, 1, 1, size])
+                }
+            }
+        }
+
+        let out = model(inputs, mask: mask, cache: cache)
         return lmHead(out)
     }
 
@@ -329,5 +455,11 @@ public class Gemma3TextModel: Module, LLMModel, KVCacheDimensionProvider {
 extension Gemma3TextModel: LoRAModel {
     public func loraLinearLayers() -> LoRALinearLayers {
         model.layers.map { ($0.selfAttention, ["q_proj", "v_proj"]) }
+    }
+}
+
+extension MLXArray {
+    public static func arange(_ size: Int) -> MLXArray {
+        return MLXArray(Array(0 ..< size))
     }
 }
