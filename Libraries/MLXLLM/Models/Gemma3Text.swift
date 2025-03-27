@@ -359,8 +359,8 @@ private class Gemma3Model: Module {
         var localCache = cache
 
         // If no mask is provided, create appropriate masks
-        var fullMask: MLXArray? = nil
-        var slidingWindowMask: MLXArray? = nil
+        var fullMask: MLXArray?
+        var slidingWindowMask: MLXArray?
 
         if mask == nil {
             // Create the standard causal mask
@@ -375,22 +375,19 @@ private class Gemma3Model: Module {
         }
 
         for (i, layer) in layers.enumerated() {
-            let isSliding = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
-
-            var layerMask = mask
+            let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
+            // Select appropriate mask based on layer position
+            var localMask = mask
             if mask == nil {
-                layerMask = isSliding ? slidingWindowMask : fullMask
+                if isGlobal {
+                    localMask = fullMask
+                } else {
+                    localMask = slidingWindowMask
+                }
             }
-
-            // Debug print for first few layers
-            if i < 3 {
-                print("Layer \(i) mask shape:", layerMask?.shape ?? "nil")
-            }
-
             let layerCache = localCache?[i]
-            h = layer(h, mask: layerMask, cache: layerCache)
+            h = layer(h, mask: localMask, cache: layerCache)
         }
-
         return norm(h)
     }
 }

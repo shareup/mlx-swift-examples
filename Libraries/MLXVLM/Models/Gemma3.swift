@@ -351,20 +351,19 @@ private class GemmaModel: Module {
 
         // Process through all layers
         for (i, layer) in layers.enumerated() {
-            let isSliding = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
-
+            let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
             // Select appropriate mask based on layer position
+            var localMask = mask
             if mask == nil {
-                if isSliding {
-                    currentMask = slidingWindowMask
+                if isGlobal {
+                    localMask = fullMask
                 } else {
-                    currentMask = fullMask
+                    localMask = slidingWindowMask
                 }
             }
-
-            h = layer(h, mask: currentMask, cache: cacheArray[i])
+            let layerCache = cacheArray[i]
+            h = layer(h, mask: localMask, cache: layerCache)
         }
-
         return norm(h)
     }
 }
