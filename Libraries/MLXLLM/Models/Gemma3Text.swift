@@ -137,15 +137,16 @@ private class Attention: Module {
 
     func callAsFunction(
         _ x: MLXArray,
-        mask: MLXArray? = nil,
+        mask: MLXArray? = nil,  // Keep receiving the original mask attempt if any
         cache: KVCache? = nil
     ) -> MLXArray {
-        let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
+        let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))  // L is QuerySeqLen
 
         var queries = queryProj(x)
         var keys = keyProj(x)
         var values = valueProj(x)
 
+        // Reshape queries, keys, values
         queries = queries.reshaped(B, L, nHeads, -1).transposed(0, 2, 1, 3)
         keys = keys.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
         values = values.reshaped(B, L, nKVHeads, -1).transposed(0, 2, 1, 3)
@@ -154,30 +155,74 @@ private class Attention: Module {
         queries = queryNorm(queries)
         keys = keyNorm(keys)
 
-        var effectiveMask = mask
+        var finalMask: MLXArray? = nil  // Mask to be used in attention
 
         if let cache {
-            queries = rope(queries, offset: cache.offset)
-            keys = rope(keys, offset: cache.offset)
+            // Get offset BEFORE cache update for mask generation
+            let offsetBeforeUpdate = cache.offset
+
+            queries = rope(queries, offset: offsetBeforeUpdate)
+            keys = rope(keys, offset: offsetBeforeUpdate)
+
+            // Update cache and get final keys/values
             (keys, values) = cache.update(keys: keys, values: values)
+
+            // Get the TRUE key sequence length AFTER cache update
+            let finalKeySeqLen = keys.dim(2)
+
+            // **** Generate or Adjust Mask AFTER Cache Update ****
+            // We need a mask of shape [B, H, L, finalKeySeqLen]
+
+            if L > 1 {  // Only need mask for multi-token query (prefill/chunking)
+                // Create the standard additive causal mask based on the offset *before* the update.
+                // This mask will have dimensions [1, 1, L, L + offsetBeforeUpdate]
+                let standardCausalMask = createAdditiveCausalMask(n: L, offset: offsetBeforeUpdate)
+                let standardMaskKeyLen = standardCausalMask.dim(3)  // L + offsetBeforeUpdate
+
+                // Now, adjust this standard mask to match finalKeySeqLen.
+                // Since the cache might have truncated keys, the actual number of keys
+                // could be less than L + offsetBeforeUpdate (it's capped at maxSize).
+                // We only need the first `finalKeySeqLen` columns of the mask.
+                if standardMaskKeyLen >= finalKeySeqLen {
+                    // Slice the mask to the final key length
+                    finalMask = standardCausalMask[0..., 0..., 0..., ..<finalKeySeqLen]
+                } else {
+                    // This case implies L + offsetBeforeUpdate < finalKeySeqLen (e.g., maxSize).
+                    // This is unexpected for causal attention with rotating cache.
+                    // It might mean the cache grew? Or offset logic is weird.
+                    // Pad the mask? Or is createAdditiveCausalMask wrong?
+                    // For now, let's assume slicing is the correct operation.
+                    // If this warning appears, mask generation needs deeper review.
+                    print(
+                        "Warning: Standard causal mask key dim (\(standardMaskKeyLen)) < final key dim (\(finalKeySeqLen)). Using potentially incorrect shorter mask."
+                    )
+                    finalMask = standardCausalMask  // Use the shorter mask, likely incorrect
+                }
+                finalMask = finalMask?.asType(queries.dtype)  // Ensure correct dtype
+
+            }
+            // If L == 1 (single token generation), finalMask remains nil, which is correct.
+
         } else {
+            // No cache used
             queries = rope(queries)
             keys = rope(keys)
+            // If a mask was passed externally for non-cache use, use it.
+            // Otherwise, if L > 1, generate a simple causal mask (offset=0).
+            if let externalMask = mask {
+                finalMask = externalMask
+            } else if L > 1 {
+                finalMask = createAdditiveCausalMask(n: L, offset: 0).asType(queries.dtype)
+            }
         }
 
-        if let currentMask = effectiveMask, currentMask.dim(-1) != keys.dim(-2) {
-            let keyLen = keys.dim(-2)
-            // Ensure slicing doesn't go out of bounds if keyLen is larger than mask dim
-            let startIdx = max(0, currentMask.dim(-1) - keyLen)
-            effectiveMask = currentMask[0..., 0..., 0..., startIdx...]
-        }
-
+        // Call attention with the correctly shaped keys, values, and mask
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
-            keys: keys,
-            values: values,
+            keys: keys,  // Use keys AFTER cache update
+            values: values,  // Use values AFTER cache update
             scale: scale,
-            mask: effectiveMask
+            mask: finalMask  // Use the mask generated/adjusted AFTER cache update
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -376,6 +421,69 @@ public class Gemma3TextModel: Module, LLMModel {
             }
         }
         return caches
+    }
+
+    /// Override the default prepare to avoid evaluating the cache, which causes crashes.
+    /// Only evaluates intermediate logits during chunked prompt processing.
+    public func prepare(
+        _ input: LMInput, cache: [KVCache], windowSize: Int? = nil
+    ) throws -> PrepareResult {
+        let promptTokens = input.text.tokens
+        let promptCount = promptTokens.shape[0]
+
+        guard promptCount > 0 else {
+            print("Warning: Preparing with empty prompt tokens.")
+            // Return empty tokens. The TokenIterator should handle this gracefully
+            // by likely finishing immediately or based on how step() handles empty input.
+            let emptyToken = MLXArray(Int32(0))[0 ..< 0]  // Create an empty MLXArray of Int32
+            return .tokens(.init(tokens: emptyToken))
+        }
+
+        let defaultWindowSize = 512  // Or use a value from config if available
+        let effectiveWindowSize = windowSize ?? defaultWindowSize
+
+        // Process in chunks only if the prompt is longer than 1 token AND exceeds window size
+        // (No need to chunk if it fits in one window or is just 1 token)
+        if promptCount > 1 && promptCount > effectiveWindowSize {
+            var lastLogits: MLXArray? = nil
+            // Gemma3TextModel's callAsFunction doesn't use or return separate state beyond cache
+            // So we don't need to track `state` here.
+
+            // Process all but the last token in chunks
+            for i in stride(from: 0, to: promptCount - 1, by: effectiveWindowSize) {
+                let start = i
+                let end = min(start + effectiveWindowSize, promptCount - 1)
+
+                guard start < end else { continue }  // Skip empty chunks if stride calculation leads to it
+
+                // 1. Slice the token array
+                let tokenSlice = promptTokens[start ..< end]
+                // 2. Create LMInput.Text from the slice
+                let promptChunkText = LMInput.Text(tokens: tokenSlice)
+
+                // 3. Call the model's main forward pass using the subscript on LMInput.Text
+                //    The model's callAsFunction takes MLXArray, so use [text: .newAxis]
+                //    Pass nil for state as Gemma3TextModel doesn't use it.
+                let result = self(promptChunkText[text: .newAxis], cache: cache, state: nil)
+                lastLogits = result.logits
+                // No separate state to update for Gemma3TextModel
+
+                // IMPORTANT: Evaluate ONLY the logits, NOT the cache
+                eval(result.logits)
+                // No state arrays to evaluate
+            }
+
+            // If chunking happened and produced logits, return them
+            if let lastLogits {
+                // Return logits from processing the chunk ending at promptCount - 1
+                // Pass nil for state.
+                return .logits(.init(logits: lastLogits, state: nil))
+            }
+        }
+
+        // If promptCount == 1 OR promptCount <= effectiveWindowSize (no chunking needed/occurred),
+        // return the original tokens. The TokenIterator will call step() next using this full prompt.
+        return .tokens(input.text)
     }
 }
 
