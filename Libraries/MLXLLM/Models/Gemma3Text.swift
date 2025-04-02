@@ -371,7 +371,7 @@ public class Gemma3TextModel: Module, LLMModel {
                 caches.append(StandardKVCache())
             } else {
                 caches.append(
-                  RotatingKVCache(maxSize: slidingWindow, keep: 0)
+                    RotatingKVCache(maxSize: slidingWindow, keep: 0)
                 )
             }
         }
