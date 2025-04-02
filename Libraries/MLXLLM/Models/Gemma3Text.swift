@@ -90,6 +90,7 @@ private class Attention: Module {
     let scale: Float
     let isSliding: Bool
     let slidingWindow: Int
+    let slidingWindowPattern: Int
 
     @ModuleInfo(key: "q_proj") var queryProj: Linear
     @ModuleInfo(key: "k_proj") var keyProj: Linear
@@ -109,6 +110,7 @@ private class Attention: Module {
         self.headDim = config.headDim
         self.layerIdx = layerIdx
         self.slidingWindow = config.slidingWindow
+        self.slidingWindowPattern = config.slidingWindowPattern
 
         self.scale = pow(config.queryPreAttnScalar, -0.5)
 
@@ -152,53 +154,30 @@ private class Attention: Module {
         queries = queryNorm(queries)
         keys = keyNorm(keys)
 
-        var localMask = mask
+        var effectiveMask = mask
 
         if let cache {
-            // Apply RoPE with offset
             queries = rope(queries, offset: cache.offset)
             keys = rope(keys, offset: cache.offset)
             (keys, values) = cache.update(keys: keys, values: values)
-
-            // Handle sliding window for cached generation
-            if isSliding && cache.offset > slidingWindow && L == 1 {
-                // Create a sliding window mask for generation
-                let size = cache.offset + L
-                let windowStart = max(0, cache.offset - slidingWindow)
-
-                // Create a mask where everything is invalid (large negative value)
-                var slidingMaskData = Array(repeating: Float32(-1e9), count: size)
-
-                // Set the sliding window positions to valid (0)
-                for i in windowStart ..< min(windowStart + slidingWindow + 1, size) {
-                    slidingMaskData[i] = 0
-                }
-
-                // Create the MLXArray from the data
-                let slidingMask = MLXArray(slidingMaskData).reshaped(1, 1, 1, size)
-                localMask = slidingMask
-            }
         } else {
-            // Apply RoPE without offset
             queries = rope(queries)
             keys = rope(keys)
         }
 
-        // Scale queries by the pre-attention scalar
-        queries = queries * MLXArray(scale).asType(queries.dtype)
-
-        // Adjust mask for sliding window if needed
-        if isSliding && localMask != nil && localMask!.dim(-1) != keys.dim(-2) {
+        if let currentMask = effectiveMask, currentMask.dim(-1) != keys.dim(-2) {
             let keyLen = keys.dim(-2)
-            localMask = localMask![0..., 0..., 0..., (localMask!.dim(-1) - keyLen)...]
+            // Ensure slicing doesn't go out of bounds if keyLen is larger than mask dim
+            let startIdx = max(0, currentMask.dim(-1) - keyLen)
+            effectiveMask = currentMask[0..., 0..., 0..., startIdx...]
         }
 
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
             keys: keys,
             values: values,
-            scale: 1.0,  // We already scaled the queries
-            mask: localMask
+            scale: scale,
+            mask: effectiveMask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -227,10 +206,10 @@ private class MLP: Module {
 private class TransformerBlock: Module {
     @ModuleInfo(key: "self_attn") var selfAttention: Attention
     @ModuleInfo var mlp: MLP
-    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: RMSNorm
-    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: RMSNorm
-    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: RMSNorm
-    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: RMSNorm
+    @ModuleInfo(key: "input_layernorm") var inputLayerNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "post_attention_layernorm") var postAttentionLayerNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "pre_feedforward_layernorm") var preFeedforwardLayerNorm: Gemma.RMSNorm
+    @ModuleInfo(key: "post_feedforward_layernorm") var postFeedforwardLayerNorm: Gemma.RMSNorm
 
     let numAttentionHeads: Int
     let hiddenSize: Int
@@ -242,13 +221,13 @@ private class TransformerBlock: Module {
         self._selfAttention.wrappedValue = Attention(config, layerIdx: layerIdx)
         self.mlp = MLP(dimensions: config.hiddenSize, hiddenDimensions: config.intermediateSize)
 
-        self._inputLayerNorm.wrappedValue = RMSNorm(
+        self._inputLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postAttentionLayerNorm.wrappedValue = RMSNorm(
+        self._postAttentionLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._preFeedforwardLayerNorm.wrappedValue = RMSNorm(
+        self._preFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
-        self._postFeedforwardLayerNorm.wrappedValue = RMSNorm(
+        self._postFeedforwardLayerNorm.wrappedValue = Gemma.RMSNorm(
             dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         super.init()
@@ -270,7 +249,7 @@ private class TransformerBlock: Module {
 private class Gemma3Model: Module {
     @ModuleInfo(key: "embed_tokens") var embedTokens: Embedding
     @ModuleInfo var layers: [TransformerBlock]
-    @ModuleInfo var norm: RMSNorm
+    @ModuleInfo var norm: Gemma.RMSNorm
 
     let config: Gemma3TextConfiguration
 
@@ -286,134 +265,117 @@ private class Gemma3Model: Module {
             TransformerBlock(config, layerIdx: layerIdx)
         }
 
-        self.norm = RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
+        self.norm = Gemma.RMSNorm(dimensions: config.hiddenSize, eps: config.rmsNormEps)
 
         super.init()
     }
 
-    private func createAdditiveCausalMask(n: Int, offset: Int) -> MLXArray {
-        let rinds = MLXArray(Int32(0) ..< Int32(offset + n))
-        let linds = offset != 0 ? MLXArray(Int32(offset) ..< Int32(offset + n)) : rinds
-        let mask = linds[0..., .newAxis] .< rinds[.newAxis]
-        // Make sure the mask has shape [1, 1, n, offset+n]
-        return (mask * Float32(-1e9)).reshaped(1, 1, n, offset + n)
-    }
-
-    // Create attention mask with sliding window support
-    private func createAttentionMask(h: MLXArray, cache: [KVCache]?, isSliding: Bool = false)
-        -> MLXArray?
+    func callAsFunction(_ inputs: MLXArray, mask: MLXArray? = nil, cache: [KVCache?]? = nil)
+        -> MLXArray
     {
-        let t = h.dim(1)
-
-        var offset = 0
-        if let cache = cache, !cache.isEmpty, let firstCache = cache.first(where: { $0 != nil }) {
-            offset = firstCache.offset
-        }
-
-        // For single token generation with history
-        if t == 1 && offset > 0 {
-            return nil  // No mask needed for single token generation
-        } else if t <= 1 && offset == 0 {
-            return nil
-        }
-
-        // Create basic causal mask
-        var mask = createAdditiveCausalMask(n: t, offset: offset).asType(h.dtype)
-
-        // Apply sliding window constraint if needed
-        if isSliding && config.slidingWindow > 0 && (t + offset) > config.slidingWindow {
-            let windowSize = config.slidingWindow
-
-            // Create a mask that limits attention to the sliding window
-            for i in 0 ..< t {
-                let row = i + offset
-                let minCol = max(0, row - windowSize)
-
-                // Set values outside the window to large negative
-                if minCol > 0 {
-                    let maskSlice = mask[0, 0, i, 0 ..< minCol]
-                    let shape = maskSlice.shape
-                    mask[0, 0, i, 0 ..< minCol] = MLXArray(
-                        Array(repeating: Float(-1e9), count: minCol))
-                }
-            }
-        }
-
-        return mask
-    }
-
-    func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
         // Apply embedding with scaling
-        let scale = sqrt(Float(config.hiddenSize))
-        var h = embedTokens(inputs) * MLXArray(scale).asType(inputs.dtype)
+        // TODO: Is type casting necessary here?
+        let scale = MLXArray(sqrtf(Float(config.hiddenSize))).asType(inputs.dtype)
+        var h = embedTokens(inputs) * scale
 
-        // Create masks if needed
-        var localMasks: [MLXArray?] = Array(repeating: nil, count: config.hiddenLayers)
-
-        for i in 0 ..< config.hiddenLayers {
-            let isGlobal = (i + 1) % config.slidingWindowPattern == 0
-            let isSliding = !isGlobal
-
-            if isSliding && inputs.dim(1) > 1 {
-                localMasks[i] = createAttentionMask(h: h, cache: cache, isSliding: true)
-            } else {
-                localMasks[i] = createAttentionMask(h: h, cache: cache, isSliding: false)
-            }
+        var layerCache = cache
+        if layerCache == nil {
+            // During training or first pass without cache, create nil placeholders
+            layerCache = Array(repeating: nil as KVCache?, count: layers.count)
         }
 
+        var fullMask: MLXArray? = nil
+        var slidingWindowMask: MLXArray? = nil
+
+        // TODO: Check this part carefully
+        if mask == nil {
+            // Create a standard causal mask for the input sequence length
+            let sequenceLength = inputs.dim(1)
+            slidingWindowMask = createAdditiveCausalMask(n: sequenceLength, offset: 0)
+            fullMask = slidingWindowMask
+        }
         for (i, layer) in layers.enumerated() {
-            let layerCache = cache?[i]
-            h = layer(h, mask: localMasks[i], cache: layerCache)
+            let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
+            var layerMask = mask  // Start with the explicitly passed mask
+
+            if mask == nil {
+                layerMask = slidingWindowMask  // Use the generated causal mask
+            }
+
+            // Apply the layer
+            h = layer(h, mask: layerMask, cache: layerCache?[i])
         }
 
         return norm(h)
     }
 }
 
-public class Gemma3TextModel: Module, LLMModel, KVCacheDimensionProvider {
+public class Gemma3TextModel: Module, LLMModel {
+
     @ModuleInfo private var model: Gemma3Model
     @ModuleInfo(key: "lm_head") var lmHead: Linear
 
     public let config: Gemma3TextConfiguration
     public var vocabularySize: Int { config.vocabularySize }
-    public var kvHeads: [Int]
 
     public init(_ config: Gemma3TextConfiguration) {
         self.config = config
         self.model = Gemma3Model(config)
         self._lmHead.wrappedValue = Linear(config.hiddenSize, config.vocabularySize, bias: false)
-
-        // Set up KV heads array based on sliding window pattern
-        var heads: [Int] = []
-        for i in 0 ..< config.hiddenLayers {
-            heads.append(config.kvHeads)
-        }
-        self.kvHeads = heads
-
         super.init()
     }
 
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]? = nil) -> MLXArray {
-        let out = model(inputs, cache: cache)
+        let optionalCache = cache?.map { $0 as KVCache? }
+        let out = model(inputs, cache: optionalCache)
         var finalLogits = lmHead(out)
-        if let softcap = config.finalLogitSoftcapping {
-            finalLogits = tanh(finalLogits / MLXArray(softcap)) * MLXArray(softcap)
+
+        // Apply final logit softcapping if configured
+        if let softcap = config.finalLogitSoftcapping, softcap > 0 {
+            let scale = MLXArray(softcap)
+            finalLogits = tanh(finalLogits / scale) * scale
         }
         return finalLogits
     }
 
+    // TODO: Check this
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights = weights
-        // Copy embedding weights to lm_head if not present
         if sanitizedWeights["lm_head.weight"] == nil {
             if let embedWeight = sanitizedWeights["model.embed_tokens.weight"] {
                 sanitizedWeights["lm_head.weight"] = embedWeight
+            } else {
+                print("Warning: Unable to find model.embed_tokens.weight for lm_head weight tying.")
             }
         }
-        // Remove RoPE frequency weights as they're computed on the fly
+        // Keep filtering RoPE keys if they exist in the checkpoint (though usually not saved)
         return sanitizedWeights.filter { key, _ in
-            !key.contains("self_attn.rotary_emb.inv_freq")
+            !key.contains("self_attn.rope.inv_freq")
+                && !key.contains("self_attn.rotary_emb.inv_freq")
         }
+    }
+
+    // public func loraLinearLayers() -> LoRALinearLayers {
+    //     model.layers.map { ($0.selfAttention, ["q_proj", "v_proj", "k_proj", "o_proj"]) } // Add k/o proj? Check common practice
+    // }
+
+    public func newCache(parameters: GenerateParameters? = nil) -> [KVCache] {
+        var caches = [KVCache]()
+        let slidingWindow = config.slidingWindow > 0 ? config.slidingWindow : 4096
+        let slidingWindowPattern = config.slidingWindowPattern
+
+        for i in 0 ..< config.hiddenLayers {
+            let isGlobalLayer = (i % slidingWindowPattern == slidingWindowPattern - 1)
+
+            if isGlobalLayer {
+                caches.append(StandardKVCache())
+            } else {
+                caches.append(
+                  RotatingKVCache(maxSize: slidingWindow, keep: 0)
+                )
+            }
+        }
+        return caches
     }
 }
 
