@@ -137,10 +137,10 @@ private class Attention: Module {
 
     func callAsFunction(
         _ x: MLXArray,
-        mask: MLXArray? = nil,  // Keep receiving the original mask attempt if any
+        mask: MLXArray? = nil,  // Keep receiving original mask (might be nil)
         cache: KVCache? = nil
     ) -> MLXArray {
-        let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))  // L is QuerySeqLen
+        let (B, L, _) = (x.dim(0), x.dim(1), x.dim(2))
 
         var queries = queryProj(x)
         var keys = keyProj(x)
@@ -155,74 +155,79 @@ private class Attention: Module {
         queries = queryNorm(queries)
         keys = keyNorm(keys)
 
-        var finalMask: MLXArray? = nil  // Mask to be used in attention
+        var finalMask: MLXArray? = nil
+        let currentOffset = cache?.offset ?? 0  // Get offset BEFORE cache update
 
-        if let cache {
-            // Get offset BEFORE cache update for mask generation
-            let offsetBeforeUpdate = cache.offset
+        // Apply RoPE
+        queries = rope(queries, offset: currentOffset)
+        keys = rope(keys, offset: currentOffset)
 
-            queries = rope(queries, offset: offsetBeforeUpdate)
-            keys = rope(keys, offset: offsetBeforeUpdate)
-
-            // Update cache and get final keys/values
+        // Update cache and get final keys/values
+        if let cache = cache {
             (keys, values) = cache.update(keys: keys, values: values)
-
-            // Get the TRUE key sequence length AFTER cache update
-            let finalKeySeqLen = keys.dim(2)
-
-            // **** Generate or Adjust Mask AFTER Cache Update ****
-            // We need a mask of shape [B, H, L, finalKeySeqLen]
-
-            if L > 1 {  // Only need mask for multi-token query (prefill/chunking)
-                // Create the standard additive causal mask based on the offset *before* the update.
-                // This mask will have dimensions [1, 1, L, L + offsetBeforeUpdate]
-                let standardCausalMask = createAdditiveCausalMask(n: L, offset: offsetBeforeUpdate)
-                let standardMaskKeyLen = standardCausalMask.dim(3)  // L + offsetBeforeUpdate
-
-                // Now, adjust this standard mask to match finalKeySeqLen.
-                // Since the cache might have truncated keys, the actual number of keys
-                // could be less than L + offsetBeforeUpdate (it's capped at maxSize).
-                // We only need the first `finalKeySeqLen` columns of the mask.
-                if standardMaskKeyLen >= finalKeySeqLen {
-                    // Slice the mask to the final key length
-                    finalMask = standardCausalMask[0..., 0..., 0..., ..<finalKeySeqLen]
-                } else {
-                    // This case implies L + offsetBeforeUpdate < finalKeySeqLen (e.g., maxSize).
-                    // This is unexpected for causal attention with rotating cache.
-                    // It might mean the cache grew? Or offset logic is weird.
-                    // Pad the mask? Or is createAdditiveCausalMask wrong?
-                    // For now, let's assume slicing is the correct operation.
-                    // If this warning appears, mask generation needs deeper review.
-                    print(
-                        "Warning: Standard causal mask key dim (\(standardMaskKeyLen)) < final key dim (\(finalKeySeqLen)). Using potentially incorrect shorter mask."
-                    )
-                    finalMask = standardCausalMask  // Use the shorter mask, likely incorrect
-                }
-                finalMask = finalMask?.asType(queries.dtype)  // Ensure correct dtype
-
-            }
-            // If L == 1 (single token generation), finalMask remains nil, which is correct.
-
-        } else {
-            // No cache used
-            queries = rope(queries)
-            keys = rope(keys)
-            // If a mask was passed externally for non-cache use, use it.
-            // Otherwise, if L > 1, generate a simple causal mask (offset=0).
-            if let externalMask = mask {
-                finalMask = externalMask
-            } else if L > 1 {
-                finalMask = createAdditiveCausalMask(n: L, offset: 0).asType(queries.dtype)
-            }
         }
 
-        // Call attention with the correctly shaped keys, values, and mask
+        // Get the TRUE key sequence length AFTER cache update
+        let finalKeySeqLen = keys.dim(2)
+
+        // **** Generate Correct Mask AFTER Cache Update ****
+        // We need a mask of shape [B, 1, L, finalKeySeqLen] or broadcastable
+
+        if L > 1 {  // Only need mask for multi-token query (prefill/chunking)
+            // 1. Create the standard additive causal mask
+            // Use currentOffset here as it defines the start of the query sequence
+            var causalMask = createAdditiveCausalMask(n: L, offset: currentOffset)
+
+            // 2. Slice the causal mask to match the actual key length from the cache
+            // Ensure slicing doesn't go out of bounds if KVCache returns shorter keys
+            let causalMaskKeyDim = causalMask.dim(3)
+            let sliceDim = min(finalKeySeqLen, causalMaskKeyDim)
+
+            // Ensure sliceDim is not negative if finalKeySeqLen or causalMaskKeyDim is 0
+            let effectiveSliceDim = max(0, sliceDim)
+
+            if effectiveSliceDim > 0 {
+                causalMask = causalMask[0..., 0..., 0..., ..<effectiveSliceDim]
+            } else if finalKeySeqLen > 0 {
+                // Handle case where causal mask was unexpectedly empty but keys exist
+                print(
+                    "Warning: Causal mask empty or invalid slice (\(effectiveSliceDim)) but finalKeySeqLen=\(finalKeySeqLen). Creating zero mask."
+                )
+                // Create a mask of zeros (allowing all attention) and rely on sliding mask if applicable
+                causalMask = MLXArray.zeros([1, 1, L, finalKeySeqLen], dtype: queries.dtype)
+            } else {
+                // Both are zero length, mask remains nil effectively
+                causalMask = MLXArray.zeros([1, 1, L, 0], dtype: queries.dtype)  // Or handle as nil
+            }
+
+            // 3. If it's a sliding layer, create and apply the sliding window mask
+            if self.isSliding {
+                // Ensure slidingWindow is positive before creating mask
+                let effectiveSlidingWindow = max(1, self.slidingWindow)  // Prevent non-positive window size
+
+                let slidingMask = createAdditiveSlidingWindowMask(
+                    querySeqLen: L,
+                    keySeqLen: finalKeySeqLen,  // Use the final key length
+                    windowSize: effectiveSlidingWindow,
+                    offset: currentOffset  // Pass the query offset
+                )
+                // Combine masks: take the maximum (least restrictive) of the two masks
+                // Since masked values are -inf, max effectively applies both constraints.
+                finalMask = MLX.maximum(causalMask, slidingMask).asType(queries.dtype)
+            } else {
+                // Global layer: only the causal mask is needed
+                finalMask = causalMask.asType(queries.dtype)
+            }
+        }
+        // If L == 1 (single token generation), finalMask remains nil, which is correct.
+
+        // Call attention
         let output = MLXFast.scaledDotProductAttention(
             queries: queries,
-            keys: keys,  // Use keys AFTER cache update
-            values: values,  // Use values AFTER cache update
+            keys: keys,
+            values: values,
             scale: scale,
-            mask: finalMask  // Use the mask generated/adjusted AFTER cache update
+            mask: finalMask  // Use the correctly generated mask
         )
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
@@ -319,8 +324,7 @@ private class Gemma3Model: Module {
         -> MLXArray
     {
         // Apply embedding with scaling
-        // TODO: Is type casting necessary here?
-        let scale = MLXArray(sqrtf(Float(config.hiddenSize))).asType(inputs.dtype)
+        let scale = MLXArray(sqrtf(Float(config.hiddenSize))).asType(inputs.dtype)  // Use config.hiddenSize
         var h = embedTokens(inputs) * scale
 
         var layerCache = cache
@@ -329,26 +333,9 @@ private class Gemma3Model: Module {
             layerCache = Array(repeating: nil as KVCache?, count: layers.count)
         }
 
-        var fullMask: MLXArray? = nil
-        var slidingWindowMask: MLXArray? = nil
-
-        // TODO: Check this part carefully
-        if mask == nil {
-            // Create a standard causal mask for the input sequence length
-            let sequenceLength = inputs.dim(1)
-            slidingWindowMask = createAdditiveCausalMask(n: sequenceLength, offset: 0)
-            fullMask = slidingWindowMask
-        }
         for (i, layer) in layers.enumerated() {
-            let isGlobal = (i % config.slidingWindowPattern == config.slidingWindowPattern - 1)
-            var layerMask = mask  // Start with the explicitly passed mask
-
-            if mask == nil {
-                layerMask = slidingWindowMask  // Use the generated causal mask
-            }
-
-            // Apply the layer
-            h = layer(h, mask: layerMask, cache: layerCache?[i])
+            // Pass the original mask (or nil) directly to the layer
+            h = layer(h, mask: mask, cache: layerCache?[i])
         }
 
         return norm(h)
@@ -497,4 +484,48 @@ extension MLXArray {
     public static func arange(_ size: Int) -> MLXArray {
         return MLXArray(Array(0 ..< size))
     }
+}
+
+/// Creates an additive sliding window mask.
+///
+/// Allows attention only to keys within the window size relative to the query position.
+/// Mask shape: [1, 1, querySeqLen, keySeqLen]
+///
+/// - Parameters:
+///   - querySeqLen: The sequence length of the query (L).
+///   - keySeqLen: The sequence length of the key (K, potentially including offset).
+///   - windowSize: The sliding window size. Must be > 0.
+///   - offset: The starting position offset of the query sequence.
+/// - Returns: An MLXArray suitable for adding to attention scores.
+public func createAdditiveSlidingWindowMask(
+  querySeqLen: Int,
+  keySeqLen: Int,
+  windowSize: Int,
+  offset: Int = 0
+) -> MLXArray {
+  precondition(windowSize > 0, "windowSize must be positive for sliding window mask")
+
+  guard querySeqLen > 0, keySeqLen > 0 else {
+    // Return an empty mask if either dimension is zero
+    return MLXArray.zeros([1, 1, querySeqLen, keySeqLen])
+  }
+
+  // Absolute positions of queries: [offset, offset + 1, ..., offset + L - 1]
+  let queryIndices = MLXArray(Int32(offset) ..< Int32(offset + querySeqLen)) // Shape [L]
+
+  // Absolute positions of keys: [0, 1, ..., K - 1]
+  let keyIndices = MLXArray(Int32(0) ..< Int32(keySeqLen)) // Shape [K]
+
+  // Condition: key_pos >= query_pos - windowSize
+  // queryIndices shape: [L, 1]
+  // keyIndices shape:   [1, K]
+  // Result shape:       [L, K]
+  let condition = keyIndices.expandedDimensions(axis: 0) .>= (queryIndices.expandedDimensions(axis: 1) - Int32(windowSize))
+
+  // Create mask: 0.0 where condition is true, -inf where false
+  // Use the same large negative number as causal mask for consistency
+  let slidingMask = MLX.where(condition, MLXArray(0.0), MLXArray(Float(-1e9)))
+
+  // Add dimensions for batch and head: [1, 1, L, K]
+  return slidingMask.expandedDimensions(axes: [0, 1])
 }
