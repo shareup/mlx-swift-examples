@@ -319,7 +319,7 @@ private enum Vision {
         @ModuleInfo(key: "position_embedding") var positionEmbedding: Embedding
 
         let positions: Int
-        let positionIds: MLXArray
+        let _positionIds: MLXArray
 
         public init(_ config: PaliGemmaConfiguration.VisionConfiguration) {
             self._patchEmbedding.wrappedValue = Conv2d(
@@ -331,13 +331,13 @@ private enum Vision {
             self._positionEmbedding.wrappedValue = Embedding(
                 embeddingCount: positions, dimensions: config.hiddenSize
             )
-            self.positionIds = MLXArray(0 ..< positions)[.newAxis, 0...]
+            self._positionIds = MLXArray(0 ..< positions)[.newAxis, 0...]
         }
 
         public func callAsFunction(_ x: MLXArray) -> MLXArray {
             var patchEmbeddings = self.patchEmbedding(x)
             patchEmbeddings = patchEmbeddings.flattened(start: 1, end: 2)
-            let embeddings = patchEmbeddings + self.positionEmbedding(self.positionIds)
+            let embeddings = patchEmbeddings + self.positionEmbedding(self._positionIds)
             return embeddings
         }
     }
@@ -424,7 +424,7 @@ private enum Vision {
 /// PaliGemma VLM `UserInputProcessor`.
 ///
 /// This is meant to be used with ``PaliGemma`` and is typically created by ``VLMModelFactory``.
-public class PaligGemmaProcessor: UserInputProcessor {
+public class PaliGemmaProcessor: UserInputProcessor {
 
     private let config: PaliGemmaProcessorConfiguration
     private let tokenizer: any Tokenizer
@@ -434,7 +434,7 @@ public class PaligGemmaProcessor: UserInputProcessor {
         self.tokenizer = tokenizer
     }
 
-    private func prepare(image: CIImage, processing: UserInput.Processing?) -> MLXArray {
+    private func prepare(image: CIImage, processing: UserInput.Processing?) throws -> MLXArray {
         // based on image_processing_siglip from transformers
         var image = image
 
@@ -446,7 +446,7 @@ public class PaligGemmaProcessor: UserInputProcessor {
         // apply user instructions
         image = MediaProcessing.apply(image, processing: processing)
 
-        image = MediaProcessing.resampleBicubic(image, to: config.size.cgSize)
+        image = try MediaProcessing.resampleBicubic(image, to: config.size.cgSize)
         image = MediaProcessing.normalize(
             image, mean: config.imageMeanTuple, std: config.imageStdTuple)
 
@@ -688,7 +688,7 @@ public struct PaliGemmaConfiguration: Codable, Sendable {
     }
 }
 
-/// Configuration for ``PaligGemmaProcessor``
+/// Configuration for ``PaliGemmaProcessor``
 public struct PaliGemmaProcessorConfiguration: Codable, Sendable {
 
     public struct Size: Codable, Sendable {

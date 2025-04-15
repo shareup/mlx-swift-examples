@@ -10,6 +10,8 @@ public enum VLMError: LocalizedError {
     case imageRequired
     case maskRequired
     case singleImageAllowed
+    case singleVideoAllowed
+    case singleMediaTypeAllowed
     case imageProcessingFailure(String)
     case processing(String)
 
@@ -21,6 +23,12 @@ public enum VLMError: LocalizedError {
             return String(localized: "An image mask is required for this operation.")
         case .singleImageAllowed:
             return String(localized: "Only a single image is allowed for this operation.")
+        case .singleVideoAllowed:
+            return String(localized: "Only a single video is allowed for this operation.")
+        case .singleMediaTypeAllowed:
+            return String(
+                localized:
+                    "Only a single media type (image or video) is allowed for this operation.")
         case .imageProcessingFailure(let details):
             return String(localized: "Failed to process the image: \(details)")
         case .processing(let details):
@@ -75,11 +83,12 @@ public class VLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
         [
             "paligemma": create(PaliGemmaConfiguration.self, PaliGemma.init),
             "qwen2_vl": create(Qwen2VLConfiguration.self, Qwen2VL.init),
+            "qwen2_5_vl": create(Qwen25VLConfiguration.self, Qwen25VL.init),
             "idefics3": create(Idefics3Configuration.self, Idefics3.init),
             "gemma3": create(Gemma3Configuration.self, Gemma3.init),
+            "smolvlm": create(SmolVLM2Configuration.self, SmolVLM2.init),
         ]
     }
-
 }
 
 public class VLMProcessorTypeRegistry: ProcessorTypeRegistry, @unchecked Sendable {
@@ -93,15 +102,19 @@ public class VLMProcessorTypeRegistry: ProcessorTypeRegistry, @unchecked Sendabl
     {
         [
             "PaliGemmaProcessor": create(
-                PaliGemmaProcessorConfiguration.self, PaligGemmaProcessor.init),
-            "Qwen2VLProcessor": create(Qwen2VLProcessorConfiguration.self, Qwen2VLProcessor.init),
+                PaliGemmaProcessorConfiguration.self, PaliGemmaProcessor.init),
+            "Qwen2VLProcessor": create(
+                Qwen2VLProcessorConfiguration.self, Qwen2VLProcessor.init),
+            "Qwen2_5_VLProcessor": create(
+                Qwen25VLProcessorConfiguration.self, Qwen25VLProcessor.init),
             "Idefics3Processor": create(
                 Idefics3ProcessorConfiguration.self, Idefics3Processor.init),
             "Gemma3Processor": create(
                 Gemma3ProcessorConfiguration.self, Gemma3Processor.init),
+            "SmolVLMProcessor": create(
+                SmolVLMProcessorConfiguration.self, SmolVLMProcessor.init),
         ]
     }
-
 }
 
 /// Registry of models and any overrides that go with them, e.g. prompt augmentation.
@@ -125,6 +138,11 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Describe the image in English"
     )
 
+    static public let qwen2_5VL3BInstruct4Bit = ModelConfiguration(
+        id: "mlx-community/Qwen2.5-VL-3B-Instruct-4bit",
+        defaultPrompt: "Describe the image in English"
+    )
+
     static public let smolvlminstruct4bit = ModelConfiguration(
         id: "mlx-community/SmolVLM-Instruct-4bit",
         defaultPrompt: "Describe the image in English"
@@ -134,14 +152,21 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "mlx-community/gemma-3-4b-it-4bit",
         defaultPrompt: "Describe the image in English",
         extraEOSTokens: ["<end_of_turn>"]
+
+      static public let smolvlm = ModelConfiguration(
+        id: "HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx",
+        defaultPrompt:
+            "What is the main action or notable event happening in this segment? Describe it in one brief sentence."
     )
 
     static public func all() -> [ModelConfiguration] {
         [
             paligemma3bMix448_8bit,
             qwen2VL2BInstruct4Bit,
+            qwen2_5VL3BInstruct4Bit,
             smolvlminstruct4bit,
             gemma3_4B_it_4bit,
+            smolvlm,
         ]
     }
 
@@ -157,7 +182,7 @@ public typealias ModelRegistry = VLMRegistry
 ///
 /// ```swift
 /// let modelContainer = try await VLMModelFactory.shared.loadContainer(
-///     configuration: ModelRegistry.paligemma3bMix4488bit)
+///     configuration: VLMRegistry.paligemma3bMix4488bit)
 /// ```
 public class VLMModelFactory: ModelFactory {
 
