@@ -152,8 +152,9 @@ public class VLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         id: "mlx-community/gemma-3-4b-it-4bit",
         defaultPrompt: "Describe the image in English",
         extraEOSTokens: ["<end_of_turn>"]
+    )
 
-      static public let smolvlm = ModelConfiguration(
+    static public let smolvlm = ModelConfiguration(
         id: "HuggingFaceTB/SmolVLM2-500M-Video-Instruct-mlx",
         defaultPrompt:
             "What is the main action or notable event happening in this segment? Describe it in one brief sentence."

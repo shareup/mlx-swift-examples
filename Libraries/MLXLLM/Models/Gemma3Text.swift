@@ -498,34 +498,36 @@ extension MLXArray {
 ///   - offset: The starting position offset of the query sequence.
 /// - Returns: An MLXArray suitable for adding to attention scores.
 public func createAdditiveSlidingWindowMask(
-  querySeqLen: Int,
-  keySeqLen: Int,
-  windowSize: Int,
-  offset: Int = 0
+    querySeqLen: Int,
+    keySeqLen: Int,
+    windowSize: Int,
+    offset: Int = 0
 ) -> MLXArray {
-  precondition(windowSize > 0, "windowSize must be positive for sliding window mask")
+    precondition(windowSize > 0, "windowSize must be positive for sliding window mask")
 
-  guard querySeqLen > 0, keySeqLen > 0 else {
-    // Return an empty mask if either dimension is zero
-    return MLXArray.zeros([1, 1, querySeqLen, keySeqLen])
-  }
+    guard querySeqLen > 0, keySeqLen > 0 else {
+        // Return an empty mask if either dimension is zero
+        return MLXArray.zeros([1, 1, querySeqLen, keySeqLen])
+    }
 
-  // Absolute positions of queries: [offset, offset + 1, ..., offset + L - 1]
-  let queryIndices = MLXArray(Int32(offset) ..< Int32(offset + querySeqLen)) // Shape [L]
+    // Absolute positions of queries: [offset, offset + 1, ..., offset + L - 1]
+    let queryIndices = MLXArray(Int32(offset) ..< Int32(offset + querySeqLen))  // Shape [L]
 
-  // Absolute positions of keys: [0, 1, ..., K - 1]
-  let keyIndices = MLXArray(Int32(0) ..< Int32(keySeqLen)) // Shape [K]
+    // Absolute positions of keys: [0, 1, ..., K - 1]
+    let keyIndices = MLXArray(Int32(0) ..< Int32(keySeqLen))  // Shape [K]
 
-  // Condition: key_pos >= query_pos - windowSize
-  // queryIndices shape: [L, 1]
-  // keyIndices shape:   [1, K]
-  // Result shape:       [L, K]
-  let condition = keyIndices.expandedDimensions(axis: 0) .>= (queryIndices.expandedDimensions(axis: 1) - Int32(windowSize))
+    // Condition: key_pos >= query_pos - windowSize
+    // queryIndices shape: [L, 1]
+    // keyIndices shape:   [1, K]
+    // Result shape:       [L, K]
+    let condition =
+        keyIndices.expandedDimensions(axis: 0)
+        .>= (queryIndices.expandedDimensions(axis: 1) - Int32(windowSize))
 
-  // Create mask: 0.0 where condition is true, -inf where false
-  // Use the same large negative number as causal mask for consistency
-  let slidingMask = MLX.where(condition, MLXArray(0.0), MLXArray(Float(-1e9)))
+    // Create mask: 0.0 where condition is true, -inf where false
+    // Use the same large negative number as causal mask for consistency
+    let slidingMask = MLX.where(condition, MLXArray(0.0), MLXArray(Float(-1e9)))
 
-  // Add dimensions for batch and head: [1, 1, L, K]
-  return slidingMask.expandedDimensions(axes: [0, 1])
+    // Add dimensions for batch and head: [1, 1, L, K]
+    return slidingMask.expandedDimensions(axes: [0, 1])
 }
