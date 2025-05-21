@@ -198,6 +198,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
     static public let gemma3_1B_4bit = ModelConfiguration(
         id: "mlx-community/gemma-3-1b-it-4bit",
         defaultPrompt: "What is the difference between a fruit and a vegetable?"
+    )
 
     static public let granite3_3_2b_4bit = ModelConfiguration(
         id: "mlx-community/granite-3.3-2b-instruct-4bit",

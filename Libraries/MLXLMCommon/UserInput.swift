@@ -38,6 +38,19 @@ public struct UserInput: Sendable {
                 return messages.map(\.content).joined(separator: "\n")
             }
         }
+        
+        public func asMessages() -> [Message] {
+            switch self {
+            case .text(let text):
+                return [["role": "user", "content": text]]
+            case .messages(let messages):
+                return messages
+            case .chat(let messages):
+                return messages.map { msg in
+                    ["role": msg.role.rawValue, "content": msg.content]
+                }
+            }
+        }
     }
 
     /// Representation of a video resource.

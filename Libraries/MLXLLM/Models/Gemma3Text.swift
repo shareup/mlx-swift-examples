@@ -370,9 +370,10 @@ public class Gemma3TextModel: Module, LLMModel {
         return finalLogits
     }
 
-    // TODO: Check this
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         var sanitizedWeights = weights
+        
+        // Check for lm_head weight and tie with embed_tokens if needed
         if sanitizedWeights["lm_head.weight"] == nil {
             if let embedWeight = sanitizedWeights["model.embed_tokens.weight"] {
                 sanitizedWeights["lm_head.weight"] = embedWeight
@@ -380,10 +381,11 @@ public class Gemma3TextModel: Module, LLMModel {
                 print("Warning: Unable to find model.embed_tokens.weight for lm_head weight tying.")
             }
         }
-        // Keep filtering RoPE keys if they exist in the checkpoint (though usually not saved)
+        
+        // Filter out any dynamically created RoPE inv_freq arrays that might be in the checkpoint
         return sanitizedWeights.filter { key, _ in
-            !key.contains("self_attn.rope.inv_freq")
-                && !key.contains("self_attn.rotary_emb.inv_freq")
+            !key.contains("self_attn.rope.inv_freq") && 
+            !key.contains("self_attn.rotary_emb.inv_freq")
         }
     }
 

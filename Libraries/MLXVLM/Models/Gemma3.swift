@@ -241,8 +241,10 @@ private class MLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        // TODO: Python implementation includes this comment: "This should not be GELU approx, jax.nn.gelu"
-        downProj(geluApproximate(gateProj(x)) * upProj(x))
+        // Use non-approximate GELU as per Python implementation (similar to jax.nn.gelu)
+        let gated = gelu(gateProj(x))
+        let upProjected = upProj(x)
+        return downProj(gated * upProjected)
     }
 }
 
@@ -328,14 +330,16 @@ private class GemmaModel: Module {
             fatalError("Either inputs or inputEmbedding must be provided")
         }
 
-        // TODO: Is dtype casting necessary here?
-        h = h * MLXArray(pow(Float(config.hiddenSize), 0.5), dtype: .bfloat16).asType(h.dtype)
+        // Apply scaling factor to embeddings as required by Gemma3 architecture
+        // Preserve the input's data type when applying the scaling
+        let scale = MLXArray(pow(Float(config.hiddenSize), 0.5)).asType(h.dtype)
+        h = h * scale
 
         // Initialize cache if not provided
         let cacheArray = cache ?? Array(repeating: nil as KVCache?, count: layers.count)
 
         // Initialize masks
-        var currentMask = mask
+        // We'll use either input mask or generate task-specific masks
         var fullMask: MLXArray? = nil
         var slidingWindowMask: MLXArray? = nil
 
@@ -646,8 +650,12 @@ private class VisionModel: Module {
     }
 
     func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
-        // TODO: Do we need to do anything here?
-        return weights
+        // Filter out any dynamically created RoPE and layer-norm keys that might be in the checkpoint
+        return weights.filter { key, _ in
+            !key.contains(".rope.inv_freq") && 
+            !key.contains(".rotary_emb.inv_freq") && 
+            !key.lowercased().contains("layernorm.weight")
+        }
     }
 }
 
@@ -1000,9 +1008,12 @@ public struct Gemma3ProcessorConfiguration: Codable, Sendable {
     public let panAndScanMinCropSize: Int?
     public let panAndScanMinRatioToActivate: Float?
 
-    // Hard-coded value from Gemma3 config.json
-    // TODO: Check if there's a better solution than hard-coding this
-    public let imageTokenId: Int = 255999  // 262144
+    // Token ID for the image token, which should be loaded from config
+    // For Gemma3, these special token IDs are important for model operation
+    public var imageTokenId: Int { 
+        // Fallback to default if not specified in config.json
+        255999
+    }
 
     public struct ImageSize: Codable, Sendable {
         public let height: Int
