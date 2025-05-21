@@ -44,6 +44,8 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
             "gemma3_text": create(Gemma3TextConfiguration.self, Gemma3TextModel.init),
             "granite": create(GraniteConfiguration.self, GraniteModel.init),
+            "mimo": create(MiMoConfiguration.self, MiMoModel.init),
+            "glm4": create(GLM4Configuration.self, GLM4Model.init),
         ]
     }
 
@@ -205,6 +207,16 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: ""
     )
 
+    static public let mimo_7b_sft_4bit = ModelConfiguration(
+        id: "mlx-community/MiMo-7B-SFT-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
+    static public let glm4_9b_4bit = ModelConfiguration(
+        id: "mlx-community/GLM-4-9B-0414-4bit",
+        defaultPrompt: "Why is the sky blue?"
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -232,6 +244,8 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             qwen3_8b_4bit,
             smolLM_135M_4bit,
             gemma3_1B_4bit,
+            mimo_7b_sft_4bit,
+            glm4_9b_4bit,
         ]
     }
 
@@ -314,7 +328,7 @@ public class LLMModelFactory: ModelFactory {
         let modelDirectory = try await downloadModel(
             hub: hub, configuration: configuration, progressHandler: progressHandler)
 
-        // load the generic config to unerstand which model and how to load the weights
+        // load the generic config to understand which model and how to load the weights
         let configurationURL = modelDirectory.appending(component: "config.json")
         let baseConfig = try JSONDecoder().decode(
             BaseConfiguration.self, from: Data(contentsOf: configurationURL))
@@ -323,7 +337,8 @@ public class LLMModelFactory: ModelFactory {
 
         // apply the weights to the bare model
         try loadWeights(
-            modelDirectory: modelDirectory, model: model, quantization: baseConfig.quantization)
+            modelDirectory: modelDirectory, model: model,
+            perLayerQuantization: baseConfig.perLayerQuantization)
 
         let tokenizer = try await loadTokenizer(configuration: configuration, hub: hub)
 

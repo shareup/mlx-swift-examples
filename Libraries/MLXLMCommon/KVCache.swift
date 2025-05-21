@@ -610,9 +610,8 @@ public func createAttentionMask(h: MLXArray, cache: [any KVCache]?, seqLenDim: I
     return nil
 }
 
-// MARK: - KVCacheSimple
-
-public class KVCacheSimple: KVCache, Evaluatable {
+/// See https://github.com/ml-explore/mlx-examples/blob/main/llms/mlx_lm/models/base.py#L11
+public class KVCacheSimple: KVCache, Evaluatable, CustomDebugStringConvertible {
     var keys: MLXArray?
     var values: MLXArray?
 
@@ -698,5 +697,9 @@ public class KVCacheSimple: KVCache, Evaluatable {
         let trimmedCount = min(self.offset, count)  // Don't trim more than available
         self.offset -= trimmedCount
         return trimmedCount
+    }
+    
+    public var debugDescription: String {
+        "\(String(describing: Self.self)) \(Unmanaged.passUnretained(self).toOpaque()), offset: \(offset), step: \(step), keys: \(keys?.shape.description ?? "-"), values: \(values?.shape.description ?? "-")"
     }
 }

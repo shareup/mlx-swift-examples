@@ -59,7 +59,9 @@ public func downloadModel(
 /// calls ``LanguageModel/sanitize(weights:)``, applies optional quantization, and
 /// updates the model with the weights.
 public func loadWeights(
-    modelDirectory: URL, model: LanguageModel, quantization: BaseConfiguration.Quantization? = nil
+    modelDirectory: URL, model: LanguageModel,
+    quantization: BaseConfiguration.Quantization? = nil,
+    perLayerQuantization: BaseConfiguration.PerLayerQuantization? = nil
 ) throws {
     // Load the weights
     var weights = [String: MLXArray]()
@@ -75,91 +77,47 @@ public func loadWeights(
     }
     // Per-model cleanup
     weights = model.sanitize(weights: weights)
-    // Apply quantization if needed
-    if let quantization = quantization {
-        // Check if we should skip quantizing vision components
-        let skipVision = shouldSkipVision(modelDirectory: modelDirectory)
-        let predicate = getClassPredicate(skipVision: skipVision, weights: weights)
-        // Use the Swift quantize function with our predicate
-        quantize(
-            model: model,
-            groupSize: quantization.groupSize,
-            bits: quantization.bits,
-            filter: predicate
-        )
+
+    // quantize if needed
+    if quantization != nil || perLayerQuantization != nil {
+        quantize(model: model) { path, module in
+            if weights["\(path).scales"] != nil {
+                if let perLayerQuantization {
+                    return perLayerQuantization.quantization(layer: path)?.asTuple
+                } else {
+                    return quantization?.asTuple
+                }
+            } else {
+                return nil
+            }
+        }
     }
+    
     // Apply the loaded weights
     let parameters = ModuleParameters.unflattened(weights)
     try model.update(parameters: parameters, verify: [.all])
     eval(model)
 }
 
-// Creates a predicate for determining which modules to quantize
-private func getClassPredicate(skipVision: Bool, weights: [String: MLXArray]? = nil) -> (
-    String, Module
-) -> Bool {
-    if skipVision {
-        // Don't quantize vision components
-        return { path, module in
-            // Check if module is quantizable (has to_quantized method in Python)
-            let isQuantizable = module is Quantizable
-            // Don't quantize vision components
-            let isNotVisionComponent =
-                !path.contains("vision_model") && !path.contains("vision_tower")
-            return isQuantizable && isNotVisionComponent
-        }
-    } else {
-        if let weights = weights {
-            // Only quantize modules that have scales in the weights
-            return { path, module in
-                // Check if module is quantizable
-                let isQuantizable = module is Quantizable
-                // Check if module has appropriate dimensions (weight.shape[-1] % 64 == 0 in Python)
-                var hasDivisibleDimensions = false
-                if let linear = module as? Linear, let lastShapeElement = linear.weight.shape.last {
-                    hasDivisibleDimensions = lastShapeElement % 64 == 0
-                } else if let embedding = module as? Embedding,
-                    let lastShapeElement = embedding.weight.shape.last
-                {
-                    hasDivisibleDimensions = lastShapeElement % 64 == 0
+// TODO remove once mlx-swift update is adopted
+func quantize(
+    model: Module,
+    filter: (String, Module) -> (groupSize: Int, bits: Int)?,
+    apply: (Module, Int, Int) -> Module? = quantizeSingle(layer:groupSize:bits:)
+) {
+    let updates =
+        model
+        .leafModules()
+        .flattened()
+        .compactMap { (path, m) -> (String, Module)? in
+            if let (groupSize, bits) = filter(path, m) {
+                if let quantized = apply(m, groupSize, bits) {
+                    return (path, quantized)
                 }
-                // Check if scales exist in weights
-                let hasScales = weights["\(path).scales"] != nil
-                return isQuantizable && hasDivisibleDimensions && hasScales
             }
-        } else {
-            // Default case - quantize modules with appropriate dimensions
-            return { _, module in
-                // Check if module is quantizable
-                let isQuantizable = module is Quantizable
-                // Check if module has appropriate dimensions
-                var hasDivisibleDimensions = false
-                if let linear = module as? Linear, let lastShapeElement = linear.weight.shape.last {
-                    hasDivisibleDimensions = lastShapeElement % 64 == 0
-                } else if let embedding = module as? Embedding,
-                    let lastShapeElement = embedding.weight.shape.last
-                {
-                    hasDivisibleDimensions = lastShapeElement % 64 == 0
-                }
-                return isQuantizable && hasDivisibleDimensions
-            }
-        }
-    }
-}
 
-// Helper function to check if vision components should be skipped during quantization
-private func shouldSkipVision(modelDirectory: URL) -> Bool {
-    let configURL = modelDirectory.appending(component: "config.json")
-    guard let configData = try? Data(contentsOf: configURL),
-        let json = try? JSONSerialization.jsonObject(with: configData) as? [String: Any]
-    else {
-        return false
-    }
-    // Check if this is a model with vision components that should be skipped
-    if let visionConfig = json["vision_config"] as? [String: Any],
-        let skipVision = visionConfig["skip_vision"] as? Bool
-    {
-        return skipVision
-    }
-    return false
+            return nil
+        }
+
+    model.update(modules: ModuleChildren.unflattened(updates))
 }
