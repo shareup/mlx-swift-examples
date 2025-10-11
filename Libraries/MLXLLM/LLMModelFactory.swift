@@ -47,9 +47,12 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "internlm2": create(InternLM2Configuration.self, InternLM2Model.init),
             "deepseek_v3": create(DeepseekV3Configuration.self, DeepseekV3Model.init),
             "granite": create(GraniteConfiguration.self, GraniteModel.init),
+            "granitemoehybrid": create(
+                GraniteMoeHybridConfiguration.self, GraniteMoeHybridModel.init),
             "mimo": create(MiMoConfiguration.self, MiMoModel.init),
             "glm4": create(GLM4Configuration.self, GLM4Model.init),
             "acereason": create(Qwen2Configuration.self, Qwen2Model.init),
+            "falcon_h1": create(FalconH1Configuration.self, FalconH1Model.init),
             "bitnet": create(BitnetConfiguration.self, BitnetModel.init),
             "smollm3": create(SmolLM3Configuration.self, SmolLM3Model.init),
             "ernie4_5": create(Ernie45Configuration.self, Ernie45Model.init),
@@ -61,6 +64,7 @@ public class LLMTypeRegistry: ModelTypeRegistry, @unchecked Sendable {
             "olmoe": create(OlmoEConfiguration.self, OlmoEModel.init),
             "olmo2": create(Olmo2Configuration.self, Olmo2Model.init),
             "bailing_moe": create(BailingMoeConfiguration.self, BailingMoeModel.init),
+            "lfm2_moe": create(LFM2MoEConfiguration.self, LFM2MoEModel.init),
         ]
     }
 }
@@ -320,6 +324,16 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
         defaultPrompt: "Why is the sky blue?"
     )
 
+    static public let granite_4_0_h_tiny_4bit_dwq = ModelConfiguration(
+        id: "mlx-community/Granite-4.0-H-Tiny-4bit-DWQ",
+        defaultPrompt: ""
+    )
+
+    static public let lfm2_8b_a1b_3bit_mlx = ModelConfiguration(
+        id: "mlx-community/LFM2-8B-A1B-3bit-MLX",
+        defaultPrompt: ""
+    )
+
     private static func all() -> [ModelConfiguration] {
         [
             codeLlama13b4bit,
@@ -333,6 +347,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             gemma3n_E4B_it_lm_4bit,
             gemma3n_E2B_it_lm_4bit,
             granite3_3_2b_4bit,
+            granite_4_0_h_tiny_4bit_dwq,
             llama3_1_8B_4bit,
             llama3_2_1B_4bit,
             llama3_2_3B_4bit,
@@ -366,6 +381,7 @@ public class LLMRegistry: AbstractModelRegistry, @unchecked Sendable {
             olmoe_1b_7b_0125_instruct_4bit,
             olmo_2_1124_7B_Instruct_4bit,
             ling_mini_2_2bit,
+            lfm2_8b_a1b_3bit_mlx,
         ]
     }
 
