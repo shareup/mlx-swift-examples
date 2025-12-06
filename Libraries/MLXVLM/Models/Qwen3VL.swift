@@ -71,7 +71,7 @@ public final class Qwen3VLProcessor: UserInputProcessor {
 
     public func prepare(input: UserInput) async throws -> LMInput {
         let messages = Qwen3VLMessageGenerator().generate(from: input)
-        var promptTokens = try tokenizer.applyChatTemplate(messages: messages)
+        var promptTokens = try tokenizer.applyChatTemplate(messages: messages, tools: input.tools)
 
         if input.images.isEmpty, input.videos.isEmpty {
             let promptArray = MLXArray(promptTokens).expandedDimensions(axis: 0)
@@ -1524,8 +1524,8 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
     public var vocabularySize: Int { config.vocabSize }
     public var kvHeads: [Int] { languageModel.kvHeads }
 
-    public func loraLinearLayers() -> LoRALinearLayers {
-        languageModel.model.layers.map { ($0.attention, ["q_proj", "v_proj"]) }
+    public var loraLayers: [Module] {
+        languageModel.model.layers
     }
 
     private func mergeInputIdsWithImageFeatures(
@@ -1710,23 +1710,20 @@ public final class Qwen3VL: Module, VLMModel, KVCacheDimensionProvider {
 
         for (key, value) in weights {
             var newKey = key
-            if newKey.contains("model.visual") {
-                newKey = newKey.replacingOccurrences(of: "model.visual", with: "vision_tower")
-            } else if newKey.contains("model.language_model") {
-                newKey = newKey.replacingOccurrences(
-                    of: "model.language_model", with: "language_model.model")
+
+            if newKey.contains("model") {
+                if newKey.contains("model.visual") {
+                    newKey = newKey.replacingOccurrences(of: "model.visual", with: "vision_tower")
+                } else if newKey.contains("model.language_model") {
+                    newKey = newKey.replacingOccurrences(
+                        of: "model.language_model", with: "language_model.model")
+                }
+            } else if newKey.contains("lm_head") {
+                newKey = newKey.replacingOccurrences(of: "lm_head", with: "language_model.lm_head")
             }
 
-            if newKey.contains("model.lm_head") {
-                newKey = newKey.replacingOccurrences(
-                    of: "model.lm_head", with: "language_model.lm_head")
-                guard !config.textConfiguration.tieWordEmbeddings else { continue }
-                adjusted[newKey] = value
-                continue
-            } else if newKey.contains("lm_head") && !newKey.contains("language_model") {
-                newKey = newKey.replacingOccurrences(of: "lm_head", with: "language_model.lm_head")
-                guard !config.textConfiguration.tieWordEmbeddings else { continue }
-                adjusted[newKey] = value
+            if config.textConfiguration.tieWordEmbeddings && newKey.contains(".lm_head.") {
+                // if using tieWordEmbeddings omit these keys as they will not be consumed
                 continue
             }
 
